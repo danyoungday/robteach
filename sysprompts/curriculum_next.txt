@@ -1,0 +1,20 @@
+This is stage {stage_num} of the curriculum. The agent has been trained on the previous stage and will resume from that checkpoint.
+
+## Previous stage's environment code:
+```python
+{prev_code}
+```
+
+## Previous stage's rationale:
+{prev_rationale}
+
+## Previous stage's evaluation results:
+{eval_summary}
+
+Design the NEXT stage that is slightly harder than the previous one. The agent's policy and value function are resumed from the previous stage, so:
+- Don't make it drastically harder — the policy needs to transfer
+- Gradually increase difficulty (e.g. wider spawn range, remove scaffolding like scripted grasps)
+- If the previous stage had very high success rate, you can make a bigger step
+- If the previous stage struggled, make only a tiny step or even add more scaffolding
+
+Use the submit_curriculum_env tool to return your code, rationale, and recommended timesteps for this stage.

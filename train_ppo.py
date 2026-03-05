@@ -5,6 +5,7 @@ Usage:
     python train_ppo.py [configs/basic.yaml]
 """
 
+import importlib.util
 import os
 import shutil
 import sys
@@ -23,7 +24,8 @@ from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
-from fixed_lift_env import FixedCubeLiftEnv
+import wandb
+from wandb.integration.sb3 import WandbCallback
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -52,10 +54,6 @@ def load_config(path: str) -> dict:
     if cfg["n_envs"] == "auto":
         cfg["n_envs"] = max(2, ((os.cpu_count() or 4) - 2) // 2 * 2)
 
-    # ranges: lists → tuples
-    cfg["cube_x_range"] = tuple(cfg["cube_x_range"])
-    cfg["cube_y_range"] = tuple(cfg["cube_y_range"])
-
     # learning_rate → linear schedule
     cfg["ppo_kwargs"]["learning_rate"] = linear_schedule(cfg["ppo_kwargs"]["learning_rate"])
 
@@ -66,22 +64,20 @@ def load_config(path: str) -> dict:
     return cfg
 
 
-def _env_factory(cfg: dict):
+def _env_factory(cfg: dict, env_cls_path: str):
     """Returns a callable that creates a single monitored env (picklable for SubprocVecEnv)."""
     def _make():
-        env = FixedCubeLiftEnv(
-            robots=cfg["robots"],
-            cube_x_range=cfg["cube_x_range"],
-            cube_y_range=cfg["cube_y_range"],
-            start_gripped=cfg.get("start_gripped", False),
-            **cfg["env_kwargs"],
-        )
+        spec = importlib.util.spec_from_file_location("curriculum_env", env_cls_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        EnvCls = mod.CurriculumEnv
+        env = EnvCls(robots=cfg["robots"], **cfg["env_kwargs"])
         return Monitor(env)
     return _make
 
 
-def make_vec_env(cfg: dict, n_envs: int, normalize: bool = True) -> DummyVecEnv | SubprocVecEnv | VecNormalize:
-    factories = [_env_factory(cfg) for _ in range(n_envs)]
+def make_vec_env(cfg: dict, n_envs: int, normalize: bool = True, env_cls_path: str = "") -> DummyVecEnv | SubprocVecEnv | VecNormalize:
+    factories = [_env_factory(cfg, env_cls_path=env_cls_path) for _ in range(n_envs)]
     if n_envs == 1:
         vec_env = DummyVecEnv(factories)
     else:
@@ -91,7 +87,7 @@ def make_vec_env(cfg: dict, n_envs: int, normalize: bool = True) -> DummyVecEnv 
     return vec_env
 
 
-def train(cfg: dict, config_path: str | None = None) -> PPO:
+def train(cfg: dict, config_path: str | None = None, resume_from: str | None = None, env_cls_path: str = "") -> PPO:
     save_dir = Path(cfg["save_dir"])
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -103,8 +99,6 @@ def train(cfg: dict, config_path: str | None = None) -> PPO:
     wandb_active = False
     wandb_cfg = cfg.get("wandb") or {}
     if wandb_cfg.get("project"):
-        import wandb
-        from wandb.integration.sb3 import WandbCallback
 
         # Log the raw YAML config (before load_config transforms)
         log_config = {}
@@ -122,12 +116,31 @@ def train(cfg: dict, config_path: str | None = None) -> PPO:
         wandb_active = True
 
     n_envs = cfg["n_envs"]
-    env = make_vec_env(cfg, n_envs)
-    model = PPO(
-        "MlpPolicy", env, device=cfg["device"],
-        tensorboard_log=str(save_dir / "tb"),
-        **cfg["ppo_kwargs"],
-    )
+    env = make_vec_env(cfg, n_envs, env_cls_path=env_cls_path)
+
+    if resume_from is not None:
+        resume_dir = Path(resume_from)
+        # Load VecNormalize stats from previous stage
+        vec_norm_path = str(resume_dir / "vec_normalize.pkl")
+        env = VecNormalize.load(vec_norm_path, env.venv if isinstance(env, VecNormalize) else env)
+        env.training = True
+        env.norm_reward = True
+
+        # Load PPO model from previous stage (architecture is fixed from saved model)
+        ppo_path = str(resume_dir / "ppo_final")
+        ppo_kwargs = {k: v for k, v in cfg["ppo_kwargs"].items() if k != "policy_kwargs"}
+        model = PPO.load(
+            ppo_path, env=env, device=cfg["device"],
+            tensorboard_log=str(save_dir / "tb"),
+            **ppo_kwargs,
+        )
+        print(f"Resumed model from {ppo_path} with norm stats from {vec_norm_path}")
+    else:
+        model = PPO(
+            "MlpPolicy", env, device=cfg["device"],
+            tensorboard_log=str(save_dir / "tb"),
+            **cfg["ppo_kwargs"],
+        )
 
     print(f"device={cfg['device']}  n_envs={n_envs}  "
           f"cores_detected={os.cpu_count()}  "
@@ -149,7 +162,7 @@ def train(cfg: dict, config_path: str | None = None) -> PPO:
         )
 
     if cfg["eval_freq"] > 0:
-        eval_env = make_vec_env(cfg, n_envs=1)
+        eval_env = make_vec_env(cfg, n_envs=1, env_cls_path=env_cls_path)
         # Freeze eval normalization stats (use training stats, don't update)
         eval_env.training = False
         eval_env.norm_reward = False
@@ -185,4 +198,4 @@ def train(cfg: dict, config_path: str | None = None) -> PPO:
 if __name__ == "__main__":
     config_path = sys.argv[1] if len(sys.argv) > 1 else "configs/basic.yaml"
     cfg = load_config(config_path)
-    train(cfg, config_path)
+    train(cfg, config_path, env_cls_path=cfg["env_cls_path"])

@@ -1,7 +1,5 @@
 robots: "Panda"
-cube_x_range: [0, 0]
-cube_y_range: [0, 0]
-start_gripped: false
+env_cls_path: "lorem ipsum dolor"
 
 env_kwargs:
   has_renderer: false
@@ -24,7 +22,7 @@ ppo_kwargs:
   gamma: 0.99
   gae_lambda: 0.95
   clip_range: 0.2
-  ent_coef: 1e-3
+  ent_coef: 0.001
   vf_coef: 0.5
   max_grad_norm: 0.5
   verbose: 1
@@ -36,11 +34,11 @@ ppo_kwargs:
       pi: [256, 256]
       vf: [256, 256]
 
-total_timesteps: 2_000_000
-save_dir: "./results/firsttry"
+total_timesteps: 1_000_000
+save_dir: "lorem ipsum dolor"
 checkpoint_freq: 50_000
 eval_freq: 50_000
 
 wandb:
-  project: ""   # user fills this in
+  project: "robosuite"   # user fills this in
   entity: null  # optional, uses default entity if null

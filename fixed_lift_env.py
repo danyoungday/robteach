@@ -98,3 +98,6 @@ class FixedCubeLiftEnv(RobosuiteGymEnv):
             raw_obs = self.env._get_observations(force_update=True)
             obs = self._flatten_obs(raw_obs)
         return obs, info
+
+
+CurriculumEnv = FixedCubeLiftEnv
