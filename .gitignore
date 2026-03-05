@@ -1,4 +1,5 @@
 __pycache__/
+.vscode/
 .claude/
 .pytest_cache/
 logs/

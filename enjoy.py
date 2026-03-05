@@ -1,25 +1,25 @@
-"""Visualize a trained SAC checkpoint in the robosuite GUI.
+"""Visualize a trained PPO checkpoint in the robosuite GUI.
 
 Usage:
-    mjpython enjoy.py logs/sac_final          # .zip extension optional
-    mjpython enjoy.py logs/checkpoints/sac_25000_steps --episodes 5
+    mjpython enjoy.py logs/ppo_final          # .zip extension optional
+    mjpython enjoy.py logs/checkpoints/ppo_50000_steps --episodes 5
 """
 
 import argparse
 from pathlib import Path
 
 import mujoco.viewer
-from stable_baselines3 import SAC
+from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecNormalize
 
-from train_sac import CONFIG, make_vec_env
+from train_ppo import CONFIG, make_vec_env
 
 
 def _find_vec_normalize(checkpoint: str) -> Path:
     """Auto-detect VecNormalize stats next to the checkpoint or in logs root."""
     ckpt = Path(checkpoint).with_suffix("")  # strip .zip if present
-    # CheckpointCallback saves as sac_vecnormalize_<steps>_steps.pkl
-    sibling = ckpt.parent / ckpt.name.replace("sac_", "sac_vecnormalize_", 1)
+    # CheckpointCallback saves as ppo_vecnormalize_<steps>_steps.pkl
+    sibling = ckpt.parent / ckpt.name.replace("ppo_", "ppo_vecnormalize_", 1)
     candidates = [
         sibling.with_suffix(".pkl"),
         ckpt.parent / "vec_normalize.pkl",
@@ -40,7 +40,7 @@ def _get_robosuite_env(vec_env):
 
 
 def run(checkpoint: str, n_episodes: int = 10):
-    model = SAC.load(checkpoint)
+    model = PPO.load(checkpoint)
 
     # Create env headless (same as training) to avoid robosuite viewer issues.
     vec_env = make_vec_env(CONFIG, n_envs=1, normalize=False)

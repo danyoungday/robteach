@@ -5,6 +5,8 @@ Usage:
     python train_ppo.py
 """
 
+import os
+
 import torch
 torch.set_num_threads(1)  # prevent PyTorch from fighting SubprocVecEnv workers for cores
 
@@ -50,13 +52,13 @@ CONFIG = dict(
     ),
 
     # Parallelism
-    n_envs=4,                # parallel envs (SubprocVecEnv); set to 1 for single-process
-    device="mps",            # "mps" | "cpu" | "cuda"
+    n_envs=max(2, ((os.cpu_count() or 4) - 2) // 2 * 2),  # auto-detect cores, reserve 2, round even
+    device="cpu",
 
     # PPO hyperparameters
     ppo_kwargs=dict(
         learning_rate=linear_schedule(3e-4),
-        n_steps=512,         # steps per env per rollout (total = n_envs * n_steps)
+        n_steps=128,         # steps per env per rollout (total = n_envs * n_steps)
         batch_size=256,
         n_epochs=10,
         gamma=0.99,
@@ -101,7 +103,7 @@ def make_vec_env(cfg: dict, n_envs: int, normalize: bool = True) -> DummyVecEnv 
     if n_envs == 1:
         vec_env = DummyVecEnv(factories)
     else:
-        vec_env = SubprocVecEnv(factories, start_method="fork")
+        vec_env = SubprocVecEnv(factories, start_method="forkserver")
     if normalize:
         vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
     return vec_env
@@ -116,6 +118,7 @@ def train(cfg: dict = CONFIG) -> PPO:
     model = PPO("MlpPolicy", env, device=cfg["device"], **cfg["ppo_kwargs"])
 
     print(f"device={cfg['device']}  n_envs={n_envs}  "
+          f"cores_detected={os.cpu_count()}  "
           f"steps/update={n_envs * cfg['ppo_kwargs']['n_steps']}")
 
     callbacks = []
