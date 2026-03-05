@@ -23,6 +23,7 @@ CONFIG = dict(
     robots="Panda",              # e.g. "UR5e", ["Panda", "Panda"]
     cube_x_range=(0, 0), # (min, max) x offset from table center; use (0, 0) to fix
     cube_y_range=(0, 0), # (min, max) y offset from table center; use (0, 0) to fix
+    start_gripped=False,
 
     env_kwargs=dict(
         has_renderer=False,
@@ -71,6 +72,7 @@ def _env_factory(cfg: dict):
             robots=cfg["robots"],
             cube_x_range=cfg["cube_x_range"],
             cube_y_range=cfg["cube_y_range"],
+            start_gripped=cfg.get("start_gripped", False),
             **cfg["env_kwargs"],
         )
         return Monitor(env)

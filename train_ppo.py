@@ -2,10 +2,12 @@
 
 Usage:
     conda activate robosuite
-    python train_ppo.py
+    python train_ppo.py [configs/basic.yaml]
 """
 
 import os
+import shutil
+import sys
 
 import torch
 torch.set_num_threads(1)  # prevent PyTorch from fighting SubprocVecEnv workers for cores
@@ -13,6 +15,7 @@ torch.set_num_threads(1)  # prevent PyTorch from fighting SubprocVecEnv workers 
 from pathlib import Path
 from typing import Callable
 
+import yaml
 from torch import nn
 
 from stable_baselines3 import PPO
@@ -32,57 +35,35 @@ def linear_schedule(initial_value: float) -> Callable[[float], float]:
     return func
 
 
-# ── Configuration ────────────────────────────────────────────────────────────
+ACTIVATION_MAP = {
+    "ReLU": nn.ReLU,
+    "Tanh": nn.Tanh,
+    "ELU": nn.ELU,
+    "GELU": nn.GELU,
+}
 
-CONFIG = dict(
-    robots="Panda",              # e.g. "UR5e", ["Panda", "Panda"]
-    cube_x_range=(0, 0), # (min, max) x offset from table center; use (0, 0) to fix
-    cube_y_range=(0, 0), # (min, max) y offset from table center; use (0, 0) to fix
 
-    env_kwargs=dict(
-        has_renderer=False,
-        has_offscreen_renderer=False,
-        use_object_obs=True,
-        use_camera_obs=False,
-        reward_shaping=True,
-        # reward_scale=1.0,        # normalize max per-step reward to 1.0
-        control_freq=20,
-        horizon=500,             # canonical benchmark setting
-        hard_reset=False,        # soft reset — much faster
-    ),
+def load_config(path: str) -> dict:
+    """Load a YAML config and apply non-serializable transformations."""
+    with open(path) as f:
+        cfg = yaml.safe_load(f)
 
-    # Parallelism
-    n_envs=max(2, ((os.cpu_count() or 4) - 2) // 2 * 2),  # auto-detect cores, reserve 2, round even
-    device="cpu",
+    # n_envs: "auto" → computed from CPU count
+    if cfg["n_envs"] == "auto":
+        cfg["n_envs"] = max(2, ((os.cpu_count() or 4) - 2) // 2 * 2)
 
-    # PPO hyperparameters
-    ppo_kwargs=dict(
-        learning_rate=linear_schedule(3e-4),
-        n_steps=128,         # steps per env per rollout (total = n_envs * n_steps)
-        batch_size=256,
-        n_epochs=10,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_range=0.2,
-        ent_coef=1e-3,       # entropy bonus — prevents premature convergence
-        vf_coef=0.5,
-        max_grad_norm=0.5,
-        verbose=1,
-        policy_kwargs=dict(
-            log_std_init=-2,         # smaller initial std → less random actions
-            ortho_init=False,        # works better with ReLU
-            activation_fn=nn.ReLU,
-            net_arch=dict(pi=[256, 256], vf=[256, 256]),
-        ),
-    ),
+    # ranges: lists → tuples
+    cfg["cube_x_range"] = tuple(cfg["cube_x_range"])
+    cfg["cube_y_range"] = tuple(cfg["cube_y_range"])
 
-    total_timesteps=1_000_000,
-    save_dir="./logs",
-    checkpoint_freq=50_000,  # 0 to disable
-    eval_freq=50_000,        # 0 to disable
-)
+    # learning_rate → linear schedule
+    cfg["ppo_kwargs"]["learning_rate"] = linear_schedule(cfg["ppo_kwargs"]["learning_rate"])
 
-# ─────────────────────────────────────────────────────────────────────────────
+    # activation_fn: string → nn.Module class
+    pk = cfg["ppo_kwargs"]["policy_kwargs"]
+    pk["activation_fn"] = ACTIVATION_MAP[pk["activation_fn"]]
+
+    return cfg
 
 
 def _env_factory(cfg: dict):
@@ -92,6 +73,7 @@ def _env_factory(cfg: dict):
             robots=cfg["robots"],
             cube_x_range=cfg["cube_x_range"],
             cube_y_range=cfg["cube_y_range"],
+            start_gripped=cfg.get("start_gripped", False),
             **cfg["env_kwargs"],
         )
         return Monitor(env)
@@ -109,13 +91,43 @@ def make_vec_env(cfg: dict, n_envs: int, normalize: bool = True) -> DummyVecEnv 
     return vec_env
 
 
-def train(cfg: dict = CONFIG) -> PPO:
+def train(cfg: dict, config_path: str | None = None) -> PPO:
     save_dir = Path(cfg["save_dir"])
     save_dir.mkdir(parents=True, exist_ok=True)
 
+    # Copy source YAML for reproducibility
+    if config_path is not None:
+        shutil.copy2(config_path, save_dir / "config.yaml")
+
+    # ── Optional wandb setup ─────────────────────────────────────────────
+    wandb_active = False
+    wandb_cfg = cfg.get("wandb") or {}
+    if wandb_cfg.get("project"):
+        import wandb
+        from wandb.integration.sb3 import WandbCallback
+
+        # Log the raw YAML config (before load_config transforms)
+        log_config = {}
+        if config_path is not None:
+            with open(config_path) as f:
+                log_config = yaml.safe_load(f)
+
+        wandb.init(
+            project=wandb_cfg["project"],
+            entity=wandb_cfg.get("entity"),
+            config=log_config,
+            sync_tensorboard=True,
+            save_code=True,
+        )
+        wandb_active = True
+
     n_envs = cfg["n_envs"]
     env = make_vec_env(cfg, n_envs)
-    model = PPO("MlpPolicy", env, device=cfg["device"], **cfg["ppo_kwargs"])
+    model = PPO(
+        "MlpPolicy", env, device=cfg["device"],
+        tensorboard_log=str(save_dir / "tb"),
+        **cfg["ppo_kwargs"],
+    )
 
     print(f"device={cfg['device']}  n_envs={n_envs}  "
           f"cores_detected={os.cpu_count()}  "
@@ -123,10 +135,13 @@ def train(cfg: dict = CONFIG) -> PPO:
 
     callbacks = []
 
+    if wandb_active:
+        callbacks.append(WandbCallback(verbose=2))
+
     if cfg["checkpoint_freq"] > 0:
         callbacks.append(
             CheckpointCallback(
-                save_freq=cfg["checkpoint_freq"],
+                save_freq=max(cfg["checkpoint_freq"] // n_envs, 1),
                 save_path=str(save_dir / "checkpoints"),
                 name_prefix="ppo",
                 save_vecnormalize=True,
@@ -143,7 +158,7 @@ def train(cfg: dict = CONFIG) -> PPO:
                 eval_env,
                 best_model_save_path=str(save_dir / "best"),
                 log_path=str(save_dir / "eval"),
-                eval_freq=cfg["eval_freq"],
+                eval_freq=max(cfg["eval_freq"] // n_envs, 1),
                 deterministic=True,
                 render=False,
             )
@@ -160,8 +175,14 @@ def train(cfg: dict = CONFIG) -> PPO:
     print(f"Saved → {out_path}.zip + vec_normalize.pkl")
 
     env.close()
+
+    if wandb_active:
+        wandb.finish()
+
     return model
 
 
 if __name__ == "__main__":
-    train()
+    config_path = sys.argv[1] if len(sys.argv) > 1 else "configs/basic.yaml"
+    cfg = load_config(config_path)
+    train(cfg, config_path)

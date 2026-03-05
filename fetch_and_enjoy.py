@@ -47,6 +47,21 @@ def _find_remote_vec_normalize(ssh_host: str, remote_dir: str, checkpoint: str) 
     )
 
 
+def _find_remote_config(ssh_host: str, remote_dir: str, checkpoint: str) -> str | None:
+    """Find config.yaml on the remote, mirroring enjoy.py's _find_config logic."""
+    ckpt = Path(checkpoint).with_suffix("")
+    candidates = [
+        ckpt.parent / "config.yaml",
+        ckpt.parent.parent / "config.yaml",
+    ]
+    for c in candidates:
+        remote_path = f"{remote_dir}/{c}"
+        if _remote_file_exists(ssh_host, remote_path):
+            return str(c)
+    print("Warning: no config.yaml found on remote; enjoy.py will use its own fallback")
+    return None
+
+
 def _scp(ssh_host: str, remote_path: str, local_path: Path):
     """SCP a single file from the remote machine."""
     local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -88,16 +103,25 @@ def main():
     print("Looking for VecNormalize stats...")
     norm_rel = _find_remote_vec_normalize(args.ssh_host, remote_dir, checkpoint)
 
-    # 2. SCP both files to matching local paths
+    print("Looking for config.yaml...")
+    config_rel = _find_remote_config(args.ssh_host, remote_dir, checkpoint)
+
+    # 2. SCP files to matching local paths
     local_model = PROJECT_ROOT / model_rel
     local_norm = PROJECT_ROOT / norm_rel
 
     _scp(args.ssh_host, f"{remote_dir}/{model_rel}", local_model)
     _scp(args.ssh_host, f"{remote_dir}/{norm_rel}", local_norm)
 
+    config_args = []
+    if config_rel is not None:
+        local_config = PROJECT_ROOT / config_rel
+        _scp(args.ssh_host, f"{remote_dir}/{config_rel}", local_config)
+        config_args = ["--config", str(local_config)]
+
     # 3. Run enjoy.py
     local_checkpoint = str(PROJECT_ROOT / checkpoint)
-    cmd = ["mjpython", "enjoy.py", local_checkpoint, "--episodes", str(args.episodes)]
+    cmd = ["mjpython", "enjoy.py", local_checkpoint, "--episodes", str(args.episodes)] + config_args
     print(f"Running: {' '.join(cmd)}")
     os.execvp(cmd[0], cmd)
 

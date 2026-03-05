@@ -108,7 +108,7 @@ def generate_curriculum(
     n_stages: int = 5,
     current_x_range: tuple = (0.0, 0.0),
     current_y_range: tuple = (0.0, 0.0),
-    model: str = "claude-sonnet-4-20250514",
+    model: str = "claude-opus-4-6",
 ) -> dict:
     """Call Claude to generate a curriculum from eval logs."""
     client = anthropic.Anthropic()

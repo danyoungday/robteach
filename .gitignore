@@ -3,5 +3,7 @@ __pycache__/
 .claude/
 .pytest_cache/
 logs/
+results/
 old/
 old2/
+wandb/
