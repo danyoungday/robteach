@@ -2,7 +2,7 @@ This is the FIRST stage of the curriculum. There is no previous training — the
 
 Design the absolute simplest environment that is essentially guaranteed to produce early successes. The agent needs to experience positive rewards quickly to bootstrap learning.
 
-Modify the environment as much as you need to achieve this as long you don't destroy the core task.
+Reduce the complexity of the task as much as possible to achieve success as quick as possible without destroying the task.
 
 Consider strategies like:
 - Placing the cube at the exact center of the table (zero spawn range) so the agent only needs to learn one reach trajectory

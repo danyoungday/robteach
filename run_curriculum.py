@@ -2,6 +2,7 @@
 
 Usage:
     python run_curriculum.py configs/basic.yaml --stages 6 --output-dir results/curriculum
+    python run_curriculum.py --resume results/curriculum --stages 8
 """
 
 import argparse
@@ -18,6 +19,21 @@ from generate_curriculum import (
     summarise_eval_log,
 )
 from train_ppo import load_config, make_vec_env, train
+
+
+def _detect_completed_stages(output_dir: Path) -> int:
+    """Return the number of fully completed stages."""
+    stage = 0
+    while (output_dir / f"stage_{stage}" / "ppo_final.zip").exists():
+        stage += 1
+    return stage
+
+
+def _load_stage_state(stage_dir: Path) -> tuple[str, str]:
+    """Read prev_code and prev_rationale from a completed stage."""
+    code = (stage_dir / "curriculum_env.py").read_text()
+    rationale = (stage_dir / "rationale.txt").read_text()
+    return code, rationale
 
 
 def validate_curriculum_env(py_path: str, cfg: dict) -> str | None:
@@ -42,22 +58,36 @@ def validate_curriculum_env(py_path: str, cfg: dict) -> str | None:
 
 
 def run_curriculum(
-    config_path: str,
+    config_path: str | None,
     n_stages: int,
     output_dir: str,
     model: str = "claude-opus-4-6",
     max_retries: int = 3,
+    resume: bool = False,
 ):
-    base_cfg = load_config(config_path)
     output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(config_path, output_dir / "base_config.yaml")
-
+    start_stage = 0
     prev_stage_dir = None
     prev_code = None
     prev_rationale = None
 
-    for stage in range(n_stages):
+    if resume:
+        saved_config = output_dir / "base_config.yaml"
+        assert saved_config.exists(), f"No base_config.yaml found in {output_dir}"
+        base_cfg = load_config(str(saved_config))
+        start_stage = _detect_completed_stages(output_dir)
+        print(f"Detected {start_stage} completed stage(s), resuming from stage {start_stage}")
+        if start_stage > 0:
+            last_stage_dir = output_dir / f"stage_{start_stage - 1}"
+            prev_code, prev_rationale = _load_stage_state(last_stage_dir)
+            prev_stage_dir = last_stage_dir
+    else:
+        assert config_path is not None, "config_path is required when not resuming"
+        base_cfg = load_config(config_path)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(config_path, output_dir / "base_config.yaml")
+
+    for stage in range(start_stage, n_stages):
         stage_dir = output_dir / f"stage_{stage}"
         stage_dir.mkdir(parents=True, exist_ok=True)
         print(f"\n{'='*60}")
@@ -153,20 +183,38 @@ def run_curriculum(
 
 def main():
     parser = argparse.ArgumentParser(description="Run curriculum learning loop")
-    parser.add_argument("config", help="Path to base YAML config")
-    parser.add_argument("--stages", type=int, default=2, help="Number of curriculum stages")
-    parser.add_argument("--output-dir", type=str, default="results/curriculum",
+    parser.add_argument("config", nargs="?", default=None,
+                        help="Path to base YAML config (not needed with --resume)")
+    parser.add_argument("--stages", type=int, default=2, help="Total number of curriculum stages")
+    parser.add_argument("--output-dir", type=str, default=None,
                         help="Output directory for all stages")
     parser.add_argument("--model", type=str, default="claude-opus-4-6",
                         help="Claude model to use for generation")
+    parser.add_argument("--resume", type=str, default=None, metavar="DIR",
+                        help="Resume from an existing output directory")
     args = parser.parse_args()
 
-    run_curriculum(
-        config_path=args.config,
-        n_stages=args.stages,
-        output_dir=args.output_dir,
-        model=args.model,
-    )
+    if args.resume:
+        if args.config:
+            parser.error("config and --resume are mutually exclusive")
+        output_dir = args.output_dir or args.resume
+        run_curriculum(
+            config_path=None,
+            n_stages=args.stages,
+            output_dir=output_dir,
+            model=args.model,
+            resume=True,
+        )
+    else:
+        if not args.config:
+            parser.error("config is required when not using --resume")
+        output_dir = args.output_dir or "results/curriculum"
+        run_curriculum(
+            config_path=args.config,
+            n_stages=args.stages,
+            output_dir=output_dir,
+            model=args.model,
+        )
 
 
 if __name__ == "__main__":
