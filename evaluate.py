@@ -96,7 +96,7 @@ def main():
     parser.add_argument("checkpoints", nargs="+", help="Path(s) to saved model(s)")
     parser.add_argument("--episodes", type=int, default=50)
     parser.add_argument("--config", default=None, help="Config override (auto-detected if omitted)")
-    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     all_results = []
