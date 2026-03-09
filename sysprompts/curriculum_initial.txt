@@ -2,13 +2,13 @@ This is the FIRST stage of the curriculum. There is no previous training — the
 
 Design the absolute simplest environment that is essentially guaranteed to produce early successes. The agent needs to experience positive rewards quickly to bootstrap learning.
 
-Reduce the complexity of the task as much as possible to achieve success as quick as possible without destroying the task.
+Reduce the complexity of the task absolutely as much as possible to achieve success as quick as possible without destroying the task.
 
 Consider strategies like:
 - Placing the cube at the exact center of the table (zero spawn range) so the agent only needs to learn one reach trajectory
 - Starting with the cube already in the gripper (scripted grasp) so the agent only needs to learn to lift
 - Adding bonus rewards for partial progress
 
-The environment should be simple enough that a randomly initialized policy stumbles into success within the first few thousand timesteps.
+The environment should be simple enough that a randomly initialized policy easily stumbles into success within the first few thousand timesteps.
 
-Use the submit_curriculum_env tool to return your code, rationale, and recommended timesteps for this stage.
+Use the submit_curriculum_env tool to return your code, rationale, and recommended timesteps for this stage. Set `continue_previous` to `false` — this is the first stage so there is nothing to continue.

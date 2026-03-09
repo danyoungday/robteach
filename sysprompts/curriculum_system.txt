@@ -269,6 +269,22 @@ class RobosuiteGymEnv(gym.Env):
    environment — as long as obs/action spaces remain unchanged.
 7. Use the `submit_curriculum_env` tool to return your code, rationale, and timesteps.
 
+## Training Configuration
+
+PPO is trained with the following parallelism settings:
+- **n_envs** (parallel workers): $n_envs
+- **n_steps** (steps per env per update): $n_steps
+- **batch_size**: $batch_size
+- **n_epochs** (SGD passes per update): $n_epochs
+- **horizon** (max episode length): $horizon
+
+Each policy update collects $n_envs × $n_steps = **$steps_per_update timesteps**.
+So `total_timesteps / $steps_per_update` = number of policy updates.
+
+When choosing `timesteps`, think in terms of policy updates. A stage needs enough
+updates to learn, typically at least 50–200 policy updates for fine-tuning and
+200–1000+ for learning new behaviors. Multiply by $steps_per_update to get timesteps.
+
 ## Curriculum Design Guidelines
 
 - The goal is to train a policy that can lift the cube from anywhere on the table.
@@ -281,4 +297,19 @@ class RobosuiteGymEnv(gym.Env):
   - Starting with the cube already grasped (scripted grasp in reset)
   - Adding bonus rewards for intermediate milestones
   - Adjusting reward scaling
-- Each stage needs enough timesteps to learn but not waste compute. Typical range: 500k-2M.
+- Each stage needs enough timesteps to learn but not waste compute. Use the policy
+  update count guidance above to calibrate.
+
+## Continue-Previous Option
+
+When generating a non-initial stage, you may set `continue_previous=true` to continue training
+on the previous stage's environment for additional timesteps instead of creating a new one.
+Use this when:
+- Rewards are still trending upward at the end of the previous training run
+- Success rate is improving but has not yet saturated
+- The agent clearly hasn't finished learning the current difficulty level
+
+Do NOT use continue_previous when:
+- Rewards have plateaued for many evaluation checkpoints
+- Success rate is already high (e.g. >80%)
+- The agent appears stuck and a different environment design might help

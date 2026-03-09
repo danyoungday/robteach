@@ -5,6 +5,7 @@ that wraps the robosuite Lift task via RobosuiteGymEnv.
 """
 
 from pathlib import Path
+from string import Template
 
 import anthropic
 import numpy as np
@@ -17,6 +18,10 @@ CURRICULUM_TOOL = {
     "input_schema": {
         "type": "object",
         "properties": {
+            "continue_previous": {
+                "type": "boolean",
+                "description": "If true, continue training on the previous stage's environment instead of generating a new one. When true, code is ignored.",
+            },
             "code": {
                 "type": "string",
                 "description": "Complete Python file with imports defining a CurriculumEnv class.",
@@ -27,16 +32,46 @@ CURRICULUM_TOOL = {
             },
             "timesteps": {
                 "type": "integer",
-                "description": "Recommended training timesteps for this stage.",
+                "description": "Recommended total training timesteps for this stage. The system prompt shows how many policy updates this translates to given the current parallelism settings.",
             },
         },
-        "required": ["code", "rationale", "timesteps"],
+        "required": ["continue_previous", "code", "rationale", "timesteps"],
     },
 }
 
 
 def _load_prompt(name: str) -> str:
     return (PROMPTS_DIR / name).read_text()
+
+
+def _build_system_prompt(cfg: dict) -> str:
+    """Load curriculum_system.txt and substitute training config variables."""
+    raw = _load_prompt("curriculum_system.txt")
+    n_envs = cfg["n_envs"]
+    n_steps = cfg["ppo_kwargs"]["n_steps"]
+    steps_per_update = n_envs * n_steps
+    return Template(raw).substitute(
+        n_envs=n_envs,
+        n_steps=n_steps,
+        batch_size=cfg["ppo_kwargs"]["batch_size"],
+        n_epochs=cfg["ppo_kwargs"]["n_epochs"],
+        horizon=cfg["env_kwargs"]["horizon"],
+        steps_per_update=steps_per_update,
+    )
+
+
+def _format_history(history: list[dict]) -> str:
+    """Format a list of stage history entries for the LLM prompt."""
+    sections = []
+    for entry in history:
+        section = (
+            f"### Stage {entry['stage_num']}\n\n"
+            f"**Environment code:**\n```python\n{entry['code']}\n```\n\n"
+            f"**Rationale:** {entry['rationale']}\n\n"
+            f"**Evaluation results:**\n{entry['eval_summary']}\n"
+        )
+        sections.append(section)
+    return "\n---\n\n".join(sections)
 
 
 def summarise_eval_log(npz_path: str) -> str:
@@ -80,27 +115,24 @@ def _call_claude(system: str, user: str, model: str) -> dict:
     raise RuntimeError("Claude did not return a tool call")
 
 
-def generate_first_stage(model: str = "claude-opus-4-6") -> dict:
+def generate_first_stage(cfg: dict, model: str = "claude-opus-4-6") -> dict:
     """Generate the first (easiest) curriculum stage."""
-    system = _load_prompt("curriculum_system.txt")
+    system = _build_system_prompt(cfg)
     user = _load_prompt("curriculum_initial.txt")
     return _call_claude(system, user, model)
 
 
 def generate_next_stage(
     stage_num: int,
-    eval_summary: str,
-    prev_code: str,
-    prev_rationale: str,
+    history: list[dict],
+    cfg: dict,
     model: str = "claude-opus-4-6",
 ) -> dict:
     """Generate the next curriculum stage given previous results."""
-    system = _load_prompt("curriculum_system.txt")
+    system = _build_system_prompt(cfg)
     template = _load_prompt("curriculum_next.txt")
     user = template.format(
         stage_num=stage_num,
-        prev_code=prev_code,
-        prev_rationale=prev_rationale,
-        eval_summary=eval_summary,
+        history=_format_history(history),
     )
     return _call_claude(system, user, model)
