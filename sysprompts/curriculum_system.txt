@@ -269,6 +269,32 @@ class RobosuiteGymEnv(gym.Env):
    environment — as long as obs/action spaces remain unchanged.
 7. Use the `submit_curriculum_env` tool to return your code, rationale, and timesteps.
 
+## Accessing Robot & Environment State
+
+**`eef_site_id` is a dict, not an int.** A common mistake is using
+`self.env.robots[0].eef_site_id` directly as a numpy index — this crashes because
+it is a dict keyed by arm name (e.g. `{"right": 42}`).
+
+```python
+# CORRECT — index with arm name
+self.env.sim.data.site_xpos[self.env.robots[0].eef_site_id["right"]]
+
+# WRONG — eef_site_id is a dict, not an int
+self.env.sim.data.site_xpos[self.env.robots[0].eef_site_id]
+```
+
+**Preferred helpers** (no raw site indexing needed):
+- Gripper-to-cube distance (used in Lift.reward()):
+  `self.env._gripper_to_target(gripper=self.env.robots[0].gripper, target=self.env.cube.root_body, target_type="body", return_distance=True)`
+- Grasp check:
+  `self.env._check_grasp(gripper=self.env.robots[0].gripper, object_geoms=self.env.cube)`
+- Lift success check:
+  `self.env._check_success()`
+- Cube position (`cube_body_id` is an int, safe to index):
+  `self.env.sim.data.body_xpos[self.env.cube_body_id]`
+
+Always prefer these helpers over raw `sim.data` indexing when possible.
+
 ## Training Configuration
 
 PPO is trained with the following parallelism settings:
@@ -300,16 +326,3 @@ updates to learn, typically at least 50–200 policy updates for fine-tuning and
 - Each stage needs enough timesteps to learn but not waste compute. Use the policy
   update count guidance above to calibrate.
 
-## Continue-Previous Option
-
-When generating a non-initial stage, you may set `continue_previous=true` to continue training
-on the previous stage's environment for additional timesteps instead of creating a new one.
-Use this when:
-- Rewards are still trending upward at the end of the previous training run
-- Success rate is improving but has not yet saturated
-- The agent clearly hasn't finished learning the current difficulty level
-
-Do NOT use continue_previous when:
-- Rewards have plateaued for many evaluation checkpoints
-- Success rate is already high (e.g. >80%)
-- The agent appears stuck and a different environment design might help

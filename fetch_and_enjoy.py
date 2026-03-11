@@ -1,13 +1,12 @@
-"""SCP a checkpoint from a remote Linux machine and visualize locally.
+"""SCP a curriculum stage from a remote Linux machine and visualize locally.
 
-Runs on the Mac. Fetches both the model .zip and VecNormalize .pkl,
+Fetches the best model, VecNormalize stats, curriculum env, and config,
 then execs enjoy.py via mjpython.
 
 Usage:
-    mjpython fetch_and_enjoy.py danyoungday@1.2.3.4
-    mjpython fetch_and_enjoy.py danyoungday@1.2.3.4 logs/checkpoints/ppo_50000_steps
-    mjpython fetch_and_enjoy.py danyoungday@1.2.3.4 --episodes 5
-    mjpython fetch_and_enjoy.py danyoungday@1.2.3.4 --remote-dir ~/other/project
+    mjpython fetch_and_enjoy.py user@host results/morehist/stage_2
+    mjpython fetch_and_enjoy.py user@host results/morehist/stage_2 --episodes 5
+    mjpython fetch_and_enjoy.py user@host results/morehist/stage_2 --remote-dir ~/other/project
 """
 
 import argparse
@@ -28,40 +27,6 @@ def _remote_file_exists(ssh_host: str, remote_path: str) -> bool:
     return result.returncode == 0
 
 
-def _find_remote_vec_normalize(ssh_host: str, remote_dir: str, checkpoint: str) -> str:
-    """Mirror the _find_vec_normalize logic from enjoy.py, but over SSH."""
-    ckpt = Path(checkpoint).with_suffix("")  # strip .zip if present
-    sibling = ckpt.parent / ckpt.name.replace("ppo_", "ppo_vecnormalize_", 1)
-    candidates = [
-        sibling.with_suffix(".pkl"),
-        ckpt.parent / "vec_normalize.pkl",
-        ckpt.parent.parent / "vec_normalize.pkl",
-    ]
-    for c in candidates:
-        remote_path = f"{remote_dir}/{c}"
-        if _remote_file_exists(ssh_host, remote_path):
-            return str(c)
-    raise FileNotFoundError(
-        f"No VecNormalize stats found on remote for checkpoint {checkpoint}. "
-        f"Searched: {[str(c) for c in candidates]}"
-    )
-
-
-def _find_remote_config(ssh_host: str, remote_dir: str, checkpoint: str) -> str | None:
-    """Find config.yaml on the remote, mirroring enjoy.py's _find_config logic."""
-    ckpt = Path(checkpoint).with_suffix("")
-    candidates = [
-        ckpt.parent / "config.yaml",
-        ckpt.parent.parent / "config.yaml",
-    ]
-    for c in candidates:
-        remote_path = f"{remote_dir}/{c}"
-        if _remote_file_exists(ssh_host, remote_path):
-            return str(c)
-    print("Warning: no config.yaml found on remote; enjoy.py will use its own fallback")
-    return None
-
-
 def _scp(ssh_host: str, remote_path: str, local_path: Path):
     """SCP a single file from the remote machine."""
     local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -74,14 +39,12 @@ def _scp(ssh_host: str, remote_path: str, local_path: Path):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Fetch a checkpoint from a remote machine and visualize with enjoy.py",
+        description="Fetch a curriculum stage from a remote machine and visualize with enjoy.py",
     )
-    parser.add_argument("ssh_host", help="SSH host, e.g. danyoungday@1.2.3.4")
+    parser.add_argument("ssh_host", help="SSH host, e.g. user@1.2.3.4")
     parser.add_argument(
-        "checkpoint",
-        nargs="?",
-        default="logs/ppo_final",
-        help="Checkpoint path relative to project root (default: logs/ppo_final)",
+        "stage_dir",
+        help="Stage directory relative to remote project root, e.g. results/morehist/stage_2",
     )
     parser.add_argument("--episodes", type=int, default=10, help="Number of episodes (default: 10)")
     parser.add_argument(
@@ -91,37 +54,39 @@ def main():
     )
     args = parser.parse_args()
 
-    checkpoint = args.checkpoint
-    remote_dir = args.remote_dir
+    remote_root = args.remote_dir
+    stage = args.stage_dir.rstrip("/")
 
-    # 1. Resolve remote files
-    model_rel = str(Path(checkpoint).with_suffix("")) + ".zip"
-    print(f"Looking for model: {remote_dir}/{model_rel}")
-    if not _remote_file_exists(args.ssh_host, f"{remote_dir}/{model_rel}"):
-        sys.exit(f"Error: remote model not found at {remote_dir}/{model_rel}")
+    # Deterministic remote paths relative to stage_dir
+    files = {
+        "model": f"{stage}/best/best_model.zip",
+        "vec_normalize": f"{stage}/best/vec_normalize.pkl",
+        "curriculum_env": f"{stage}/curriculum_env.py",
+        "config": str(Path(stage).parent / "base_config.yaml"),
+    }
 
-    print("Looking for VecNormalize stats...")
-    norm_rel = _find_remote_vec_normalize(args.ssh_host, remote_dir, checkpoint)
+    # Verify all remote files exist
+    for name, rel_path in files.items():
+        full = f"{remote_root}/{rel_path}"
+        print(f"Checking {name}: {full}")
+        if not _remote_file_exists(args.ssh_host, full):
+            sys.exit(f"Error: {name} not found at {full}")
 
-    print("Looking for config.yaml...")
-    config_rel = _find_remote_config(args.ssh_host, remote_dir, checkpoint)
+    # SCP all files to matching local paths
+    local_paths = {}
+    for name, rel_path in files.items():
+        local = PROJECT_ROOT / rel_path
+        _scp(args.ssh_host, f"{remote_root}/{rel_path}", local)
+        local_paths[name] = local
 
-    # 2. SCP files to matching local paths
-    local_model = PROJECT_ROOT / model_rel
-    local_norm = PROJECT_ROOT / norm_rel
-
-    _scp(args.ssh_host, f"{remote_dir}/{model_rel}", local_model)
-    _scp(args.ssh_host, f"{remote_dir}/{norm_rel}", local_norm)
-
-    config_args = []
-    if config_rel is not None:
-        local_config = PROJECT_ROOT / config_rel
-        _scp(args.ssh_host, f"{remote_dir}/{config_rel}", local_config)
-        config_args = ["--config", str(local_config)]
-
-    # 3. Run enjoy.py
-    local_checkpoint = str(PROJECT_ROOT / checkpoint)
-    cmd = ["mjpython", "enjoy.py", local_checkpoint, "--episodes", str(args.episodes)] + config_args
+    # Run enjoy.py
+    cmd = [
+        "mjpython", "enjoy.py",
+        str(local_paths["model"]),
+        "--episodes", str(args.episodes),
+        "--config", str(local_paths["config"]),
+        "--env-cls-path", str(local_paths["curriculum_env"]),
+    ]
     print(f"Running: {' '.join(cmd)}")
     os.execvp(cmd[0], cmd)
 

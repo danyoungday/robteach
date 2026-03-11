@@ -3,6 +3,7 @@
 Usage:
     mjpython enjoy.py logs/ppo_final          # .zip extension optional
     mjpython enjoy.py logs/checkpoints/ppo_50000_steps --episodes 5
+    mjpython enjoy.py results/stage_0/best/best_model --env-cls-path results/stage_0/curriculum_env.py
 """
 
 import argparse
@@ -13,6 +14,8 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecNormalize
 
 from train_ppo import load_config, make_vec_env
+
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 def _find_vec_normalize(checkpoint: str) -> Path:
@@ -32,6 +35,22 @@ def _find_vec_normalize(checkpoint: str) -> Path:
         f"No VecNormalize stats found for checkpoint {checkpoint}. "
         f"Searched: {[str(c) for c in candidates]}"
     )
+
+
+def _find_env_cls_path(checkpoint: str, cli_override: str | None = None) -> str:
+    """Resolve the env class path: CLI override > nearby curriculum_env.py > baseline_env.py."""
+    if cli_override is not None:
+        return cli_override
+    ckpt = Path(checkpoint).with_suffix("")
+    candidates = [
+        ckpt.parent / "curriculum_env.py",
+        ckpt.parent.parent / "curriculum_env.py",
+        ckpt.parent.parent.parent / "curriculum_env.py",
+    ]
+    for p in candidates:
+        if p.exists():
+            return str(p)
+    return str(PROJECT_ROOT / "baseline_env.py")
 
 
 def _get_robosuite_env(vec_env):
@@ -58,15 +77,19 @@ def _find_config(checkpoint: str, cli_config: str | None = None) -> str:
     )
 
 
-def run(checkpoint: str, n_episodes: int = 10, config_override: str | None = None):
+def run(checkpoint: str, n_episodes: int = 10, config_override: str | None = None,
+        env_cls_path_override: str | None = None):
     config_path = _find_config(checkpoint, config_override)
     cfg = load_config(config_path)
     print(f"Loaded config from {config_path}")
 
+    env_cls_path = _find_env_cls_path(checkpoint, env_cls_path_override)
+    print(f"Using env class from {env_cls_path}")
+
     model = PPO.load(checkpoint)
 
     # Create env headless (same as training) to avoid robosuite viewer issues.
-    vec_env = make_vec_env(cfg, n_envs=1, normalize=False)
+    vec_env = make_vec_env(cfg, n_envs=1, normalize=False, env_cls_path=env_cls_path)
 
     norm_file = _find_vec_normalize(checkpoint)
     vec_env = VecNormalize.load(str(norm_file), vec_env)
@@ -109,6 +132,7 @@ if __name__ == "__main__":
     parser.add_argument("checkpoint", help="Path to saved model (.zip or without extension)")
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--config", default=None, help="Path to YAML config (auto-detected from checkpoint dir if omitted)")
+    parser.add_argument("--env-cls-path", default=None, help="Path to curriculum_env.py (auto-detected from checkpoint dir if omitted)")
     args = parser.parse_args()
 
-    run(args.checkpoint, args.episodes, args.config)
+    run(args.checkpoint, args.episodes, args.config, args.env_cls_path)

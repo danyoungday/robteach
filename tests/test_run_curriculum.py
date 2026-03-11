@@ -1,19 +1,30 @@
 """Tests for run_curriculum.py resume functionality."""
 
 import shutil
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import yaml
 
-from generate_curriculum import _build_system_prompt
+from generate_curriculum import _build_system_prompt, append_error_to_messages, summarise_eval_log
 from run_curriculum import (
     _detect_completed_stages,
     _load_stage_history_entry,
     _load_stage_state,
     run_curriculum,
 )
+
+
+# Helper: generate functions now return (dict, list) tuples
+_FAKE_MESSAGES = [{"role": "user", "content": "fake"}]
+
+
+def _gen_result(result_dict):
+    """Wrap a result dict into the (dict, messages) tuple that generate_* returns."""
+    return (result_dict, _FAKE_MESSAGES)
 
 
 @pytest.fixture
@@ -63,7 +74,8 @@ def output_dir(tmp_path):
     return tmp_path
 
 
-def _make_completed_stage(output_dir: Path, stage: int, code: str = "", rationale: str = ""):
+def _make_completed_stage(output_dir: Path, stage: int, code: str = "", rationale: str = "",
+                          stop_reason: str = "completed"):
     """Create a completed stage directory with all expected files."""
     stage_dir = output_dir / f"stage_{stage}"
     stage_dir.mkdir(parents=True, exist_ok=True)
@@ -72,6 +84,7 @@ def _make_completed_stage(output_dir: Path, stage: int, code: str = "", rational
     (stage_dir / "curriculum_env.py").write_text(code or f"# stage {stage} env code")
     (stage_dir / "rationale.txt").write_text(rationale or f"rationale for stage {stage}")
     (stage_dir / "timesteps.txt").write_text("100000")
+    (stage_dir / "stop_reason.txt").write_text(stop_reason)
     # Create eval dir with fake npz
     eval_dir = stage_dir / "eval"
     eval_dir.mkdir(parents=True, exist_ok=True)
@@ -134,9 +147,11 @@ class TestLoadStageHistoryEntry:
         _make_completed_stage(output_dir, 0, code="code0", rationale="rat0")
         entry = _load_stage_history_entry(output_dir / "stage_0", 0)
         assert entry["stage_num"] == 0
+        assert entry["stage_dir"] == output_dir / "stage_0"
         assert entry["code"] == "code0"
         assert entry["rationale"] == "rat0"
         assert entry["eval_summary"] == "(no evaluation data available)"
+        assert entry["stop_reason"] == "completed"
 
     def test_missing_files_raises(self, output_dir):
         stage_dir = output_dir / "stage_0"
@@ -149,7 +164,7 @@ class TestLoadStageHistoryEntry:
 
 
 class TestRunCurriculumResume:
-    @patch("run_curriculum.train")
+    @patch("run_curriculum.train", return_value={"stop_reason": "completed"})
     @patch("run_curriculum.validate_curriculum_env", return_value=None)
     @patch("run_curriculum.generate_next_stage")
     @patch("run_curriculum.generate_first_stage")
@@ -161,12 +176,11 @@ class TestRunCurriculumResume:
         _make_completed_stage(output_dir, 0, code="code0", rationale="rat0")
         _make_completed_stage(output_dir, 1, code="code1", rationale="rat1")
 
-        mock_gen_next.return_value = {
-            "continue_previous": False,
+        mock_gen_next.return_value = _gen_result({
             "code": "code2",
             "rationale": "rat2",
             "timesteps": 50000,
-        }
+        })
 
         run_curriculum(
             config_path=None,
@@ -181,7 +195,7 @@ class TestRunCurriculumResume:
         mock_gen_next.assert_called_once()
         call_kwargs = mock_gen_next.call_args
         assert call_kwargs.kwargs["stage_num"] == 2
-        # Should receive history as list of dicts
+        # Should receive full history as list of dicts
         history = call_kwargs.kwargs["history"]
         assert isinstance(history, list)
         assert len(history) == 2
@@ -190,7 +204,7 @@ class TestRunCurriculumResume:
         # Should train exactly once
         mock_train.assert_called_once()
 
-    @patch("run_curriculum.train")
+    @patch("run_curriculum.train", return_value={"stop_reason": "completed"})
     @patch("run_curriculum.validate_curriculum_env", return_value=None)
     @patch("run_curriculum.generate_next_stage")
     @patch("run_curriculum.generate_first_stage")
@@ -212,19 +226,18 @@ class TestRunCurriculumResume:
         mock_gen_next.assert_not_called()
         mock_train.assert_not_called()
 
-    @patch("run_curriculum.train")
+    @patch("run_curriculum.train", return_value={"stop_reason": "completed"})
     @patch("run_curriculum.validate_curriculum_env", return_value=None)
     @patch("run_curriculum.generate_first_stage")
     def test_resume_zero_stages_generates_first(
         self, mock_gen_first, mock_validate, mock_train, output_dir
     ):
         """Resuming with 0 completed stages generates from stage 0."""
-        mock_gen_first.return_value = {
-            "continue_previous": False,
+        mock_gen_first.return_value = _gen_result({
             "code": "code0",
             "rationale": "rat0",
             "timesteps": 50000,
-        }
+        })
 
         run_curriculum(
             config_path=None,
@@ -236,7 +249,7 @@ class TestRunCurriculumResume:
         mock_gen_first.assert_called_once()
         mock_train.assert_called_once()
 
-    @patch("run_curriculum.train")
+    @patch("run_curriculum.train", return_value={"stop_reason": "completed"})
     @patch("run_curriculum.validate_curriculum_env", return_value=None)
     @patch("run_curriculum.generate_next_stage")
     @patch("run_curriculum.generate_first_stage")
@@ -247,12 +260,11 @@ class TestRunCurriculumResume:
         """When resuming from stage 1, train should get resume_from pointing to stage_0."""
         _make_completed_stage(output_dir, 0, code="code0", rationale="rat0")
 
-        mock_gen_next.return_value = {
-            "continue_previous": False,
+        mock_gen_next.return_value = _gen_result({
             "code": "code1",
             "rationale": "rat1",
             "timesteps": 50000,
-        }
+        })
 
         run_curriculum(
             config_path=None,
@@ -262,7 +274,11 @@ class TestRunCurriculumResume:
         )
 
         train_call = mock_train.call_args
-        assert train_call.kwargs["resume_from"] == str(output_dir / "stage_0")
+        best_dir = output_dir / "stage_0" / "best"
+        assert train_call.kwargs["resume_from"] == {
+            "ppo_path": str(best_dir / "best_model"),
+            "vec_norm_path": str(best_dir / "vec_normalize.pkl"),
+        }
 
     def test_resume_no_config_file_raises(self, tmp_path):
         """Resuming from a dir without base_config.yaml should fail."""
@@ -274,7 +290,7 @@ class TestRunCurriculumResume:
                 resume=True,
             )
 
-    @patch("run_curriculum.train")
+    @patch("run_curriculum.train", return_value={"stop_reason": "completed"})
     @patch("run_curriculum.validate_curriculum_env", return_value=None)
     @patch("run_curriculum.generate_next_stage")
     @patch("run_curriculum.generate_first_stage")
@@ -286,8 +302,8 @@ class TestRunCurriculumResume:
         _make_completed_stage(output_dir, 0, code="code0", rationale="rat0")
 
         mock_gen_next.side_effect = [
-            {"continue_previous": False, "code": "code1", "rationale": "rat1", "timesteps": 50000},
-            {"continue_previous": False, "code": "code2", "rationale": "rat2", "timesteps": 60000},
+            _gen_result({"code": "code1", "rationale": "rat1", "timesteps": 50000}),
+            _gen_result({"code": "code2", "rationale": "rat2", "timesteps": 60000}),
         ]
 
         run_curriculum(
@@ -313,178 +329,22 @@ class TestRunCurriculumResume:
         assert second_call.kwargs["stage_num"] == 2
 
 
-# ── continue_previous tests ─────────────────────────────────────────────────
-
-
-class TestContinuePrevious:
-    @patch("run_curriculum.train")
-    @patch("run_curriculum.validate_curriculum_env", return_value=None)
-    @patch("run_curriculum.generate_next_stage")
-    @patch("run_curriculum.generate_first_stage")
-    @patch("run_curriculum.summarise_eval_log", return_value="eval summary")
-    def test_continue_copies_previous_env(
-        self, mock_summarise, mock_gen_first, mock_gen_next, mock_validate, mock_train, output_dir
-    ):
-        """When continue_previous=True, should copy env from previous stage."""
-        _make_completed_stage(output_dir, 0, code="code0", rationale="rat0")
-
-        mock_gen_next.return_value = {
-            "continue_previous": True,
-            "code": "ignored_code",
-            "rationale": "continue training",
-            "timesteps": 100000,
-        }
-
-        run_curriculum(
-            config_path=None,
-            n_stages=2,
-            output_dir=str(output_dir),
-            resume=True,
-        )
-
-        # The env file should be copied from stage_0, not the LLM output
-        stage_1_env = (output_dir / "stage_1" / "curriculum_env.py").read_text()
-        assert stage_1_env == "code0"
-
-    @patch("run_curriculum.train")
-    @patch("run_curriculum.validate_curriculum_env", return_value=None)
-    @patch("run_curriculum.generate_next_stage")
-    @patch("run_curriculum.generate_first_stage")
-    @patch("run_curriculum.summarise_eval_log", return_value="eval summary")
-    def test_continue_skips_validation(
-        self, mock_summarise, mock_gen_first, mock_gen_next, mock_validate, mock_train, output_dir
-    ):
-        """When continue_previous=True, validation should be skipped."""
-        _make_completed_stage(output_dir, 0, code="code0", rationale="rat0")
-
-        mock_gen_next.return_value = {
-            "continue_previous": True,
-            "code": "ignored",
-            "rationale": "continue",
-            "timesteps": 100000,
-        }
-
-        run_curriculum(
-            config_path=None,
-            n_stages=2,
-            output_dir=str(output_dir),
-            resume=True,
-        )
-
-        mock_validate.assert_not_called()
-
-    @patch("run_curriculum.train")
-    @patch("run_curriculum.validate_curriculum_env", return_value=None)
-    @patch("run_curriculum.generate_first_stage")
-    def test_continue_ignored_at_stage_zero(
-        self, mock_gen_first, mock_validate, mock_train, output_dir
-    ):
-        """continue_previous at stage 0 should be ignored (treated as false)."""
-        mock_gen_first.return_value = {
-            "continue_previous": True,
-            "code": "code0",
-            "rationale": "first stage",
-            "timesteps": 50000,
-        }
-
-        run_curriculum(
-            config_path=None,
-            n_stages=1,
-            output_dir=str(output_dir),
-            resume=True,
-        )
-
-        # Should still validate (not treated as continue)
-        mock_validate.assert_called_once()
-        mock_train.assert_called_once()
-
-
-# ── history_k tests ──────────────────────────────────────────────────────────
-
-
-class TestHistoryK:
-    @patch("run_curriculum.train")
-    @patch("run_curriculum.validate_curriculum_env", return_value=None)
-    @patch("run_curriculum.generate_next_stage")
-    @patch("run_curriculum.generate_first_stage")
-    @patch("run_curriculum.summarise_eval_log", return_value="eval summary")
-    def test_history_k_limits_shown_stages(
-        self, mock_summarise, mock_gen_first, mock_gen_next, mock_validate, mock_train, output_dir
-    ):
-        """With history_k=1, only the most recent stage should be in history."""
-        _make_completed_stage(output_dir, 0, code="code0", rationale="rat0")
-        _make_completed_stage(output_dir, 1, code="code1", rationale="rat1")
-        _make_completed_stage(output_dir, 2, code="code2", rationale="rat2")
-
-        mock_gen_next.return_value = {
-            "continue_previous": False,
-            "code": "code3",
-            "rationale": "rat3",
-            "timesteps": 50000,
-        }
-
-        run_curriculum(
-            config_path=None,
-            n_stages=4,
-            output_dir=str(output_dir),
-            resume=True,
-            history_k=1,
-        )
-
-        call_kwargs = mock_gen_next.call_args
-        history = call_kwargs.kwargs["history"]
-        assert len(history) == 1
-        assert history[0]["code"] == "code2"
-
-    @patch("run_curriculum.train")
-    @patch("run_curriculum.validate_curriculum_env", return_value=None)
-    @patch("run_curriculum.generate_next_stage")
-    @patch("run_curriculum.generate_first_stage")
-    @patch("run_curriculum.summarise_eval_log", return_value="eval summary")
-    def test_history_k_larger_than_available(
-        self, mock_summarise, mock_gen_first, mock_gen_next, mock_validate, mock_train, output_dir
-    ):
-        """With history_k=5 but only 1 completed stage, history should have 1 entry."""
-        _make_completed_stage(output_dir, 0, code="code0", rationale="rat0")
-
-        mock_gen_next.return_value = {
-            "continue_previous": False,
-            "code": "code1",
-            "rationale": "rat1",
-            "timesteps": 50000,
-        }
-
-        run_curriculum(
-            config_path=None,
-            n_stages=2,
-            output_dir=str(output_dir),
-            resume=True,
-            history_k=5,
-        )
-
-        call_kwargs = mock_gen_next.call_args
-        history = call_kwargs.kwargs["history"]
-        assert len(history) == 1
-        assert history[0]["code"] == "code0"
-
-
 # ── cfg kwarg tests ──────────────────────────────────────────────────────────
 
 
 class TestCfgPassedToGenerate:
-    @patch("run_curriculum.train")
+    @patch("run_curriculum.train", return_value={"stop_reason": "completed"})
     @patch("run_curriculum.validate_curriculum_env", return_value=None)
     @patch("run_curriculum.generate_first_stage")
     def test_first_stage_receives_cfg(
         self, mock_gen_first, mock_validate, mock_train, output_dir
     ):
         """generate_first_stage should receive cfg kwarg."""
-        mock_gen_first.return_value = {
-            "continue_previous": False,
+        mock_gen_first.return_value = _gen_result({
             "code": "code0",
             "rationale": "rat0",
             "timesteps": 50000,
-        }
+        })
 
         run_curriculum(
             config_path=None,
@@ -497,7 +357,7 @@ class TestCfgPassedToGenerate:
         assert "cfg" in call_kwargs.kwargs
         assert call_kwargs.kwargs["cfg"]["robots"] == "Panda"
 
-    @patch("run_curriculum.train")
+    @patch("run_curriculum.train", return_value={"stop_reason": "completed"})
     @patch("run_curriculum.validate_curriculum_env", return_value=None)
     @patch("run_curriculum.generate_next_stage")
     @patch("run_curriculum.generate_first_stage")
@@ -508,12 +368,11 @@ class TestCfgPassedToGenerate:
         """generate_next_stage should receive cfg kwarg."""
         _make_completed_stage(output_dir, 0, code="code0", rationale="rat0")
 
-        mock_gen_next.return_value = {
-            "continue_previous": False,
+        mock_gen_next.return_value = _gen_result({
             "code": "code1",
             "rationale": "rat1",
             "timesteps": 50000,
-        }
+        })
 
         run_curriculum(
             config_path=None,
@@ -556,3 +415,248 @@ class TestBuildSystemPrompt:
         import re
         unresolved = re.findall(r"\$[a-z_]+", prompt)
         assert unresolved == [], f"Unresolved placeholders: {unresolved}"
+
+
+# ── append_error_to_messages tests ──────────────────────────────────────────
+
+
+class TestAppendErrorToMessages:
+    def test_appends_tool_result_with_error(self):
+        """Should append a tool_result with is_error=True."""
+        tool_use_block = MagicMock()
+        tool_use_block.type = "tool_use"
+        tool_use_block.id = "toolu_123"
+
+        messages = [
+            {"role": "user", "content": "generate env"},
+            {"role": "assistant", "content": [tool_use_block]},
+        ]
+
+        result = append_error_to_messages(messages, "ImportError: no module")
+
+        # Original messages unchanged
+        assert len(messages) == 2
+        # New list has 3 entries
+        assert len(result) == 3
+        tool_result = result[2]
+        assert tool_result["role"] == "user"
+        block = tool_result["content"][0]
+        assert block["type"] == "tool_result"
+        assert block["tool_use_id"] == "toolu_123"
+        assert block["is_error"] is True
+        assert block["content"] == "ImportError: no module"
+
+    def test_raises_if_no_tool_use(self):
+        """Should raise ValueError when no tool_use block found."""
+        text_block = MagicMock()
+        text_block.type = "text"
+
+        messages = [
+            {"role": "assistant", "content": [text_block]},
+        ]
+
+        with pytest.raises(ValueError, match="No tool_use block"):
+            append_error_to_messages(messages, "some error")
+
+
+# ── retry with error feedback tests ─────────────────────────────────────────
+
+
+class TestRetryWithErrorFeedback:
+    @patch("run_curriculum.train", return_value={"stop_reason": "completed"})
+    @patch("run_curriculum.validate_curriculum_env")
+    @patch("run_curriculum.generate_first_stage")
+    def test_error_passed_on_retry(
+        self, mock_gen_first, mock_validate, mock_train, output_dir
+    ):
+        """On validation failure, second call should receive previous_messages."""
+        tool_use_block = MagicMock()
+        tool_use_block.type = "tool_use"
+        tool_use_block.id = "toolu_abc"
+
+        first_messages = [
+            {"role": "user", "content": "initial"},
+            {"role": "assistant", "content": [tool_use_block]},
+        ]
+
+        bad_result = {
+            "code": "bad code",
+            "rationale": "attempt 1",
+            "timesteps": 50000,
+        }
+        good_result = {
+            "code": "good code",
+            "rationale": "attempt 2",
+            "timesteps": 50000,
+        }
+
+        mock_gen_first.side_effect = [
+            (bad_result, first_messages),
+            (good_result, first_messages),
+        ]
+        # First validation fails, second passes
+        mock_validate.side_effect = ["Traceback: some error", None]
+
+        run_curriculum(
+            config_path=None,
+            n_stages=1,
+            output_dir=str(output_dir),
+            resume=True,
+        )
+
+        assert mock_gen_first.call_count == 2
+        # First call: previous_messages should be None
+        first_call = mock_gen_first.call_args_list[0]
+        assert first_call.kwargs["previous_messages"] is None
+        # Second call: previous_messages should be populated with error
+        second_call = mock_gen_first.call_args_list[1]
+        prev_msgs = second_call.kwargs["previous_messages"]
+        assert prev_msgs is not None
+        # Should have original messages + error tool_result
+        assert len(prev_msgs) == 3
+        error_msg = prev_msgs[-1]
+        assert error_msg["content"][0]["is_error"] is True
+        assert "some error" in error_msg["content"][0]["content"]
+
+    @patch("run_curriculum.train", return_value={"stop_reason": "completed"})
+    @patch("run_curriculum.validate_curriculum_env")
+    @patch("run_curriculum.generate_next_stage")
+    @patch("run_curriculum.generate_first_stage")
+    @patch("run_curriculum.summarise_eval_log", return_value="eval summary")
+    def test_error_passed_on_retry_next_stage(
+        self, mock_summarise, mock_gen_first, mock_gen_next, mock_validate, mock_train, output_dir
+    ):
+        """Same as above but for generate_next_stage."""
+        _make_completed_stage(output_dir, 0, code="code0", rationale="rat0")
+
+        tool_use_block = MagicMock()
+        tool_use_block.type = "tool_use"
+        tool_use_block.id = "toolu_xyz"
+
+        messages = [
+            {"role": "user", "content": "next stage"},
+            {"role": "assistant", "content": [tool_use_block]},
+        ]
+
+        mock_gen_next.side_effect = [
+            ({"code": "bad", "rationale": "r1", "timesteps": 50000}, messages),
+            ({"code": "good", "rationale": "r2", "timesteps": 50000}, messages),
+        ]
+        mock_validate.side_effect = ["error trace", None]
+
+        run_curriculum(
+            config_path=None,
+            n_stages=2,
+            output_dir=str(output_dir),
+            resume=True,
+        )
+
+        assert mock_gen_next.call_count == 2
+        first_call = mock_gen_next.call_args_list[0]
+        assert first_call.kwargs["previous_messages"] is None
+        second_call = mock_gen_next.call_args_list[1]
+        assert second_call.kwargs["previous_messages"] is not None
+
+
+# ── summarise_eval_log tests ─────────────────────────────────────────────────
+
+
+def _make_eval_npz(tmp_dir, timesteps, results, ep_lengths, successes):
+    """Create a fake evaluations.npz and return its path."""
+    path = Path(tmp_dir) / "evaluations.npz"
+    np.savez(
+        path,
+        timesteps=np.array(timesteps),
+        results=np.array(results),
+        ep_lengths=np.array(ep_lengths),
+        successes=np.array(successes),
+    )
+    return str(path)
+
+
+class TestSummariseEvalLog:
+    def test_completed_zero_success_no_false_claim(self, tmp_path):
+        """Completed run with 0% success must NOT claim 100% success."""
+        n_checkpoints = 5
+        n_eps = 10
+        timesteps = [10000 * (i + 1) for i in range(n_checkpoints)]
+        results = [[0.1] * n_eps for _ in range(n_checkpoints)]
+        lengths = [[500] * n_eps for _ in range(n_checkpoints)]
+        successes = [[False] * n_eps for _ in range(n_checkpoints)]
+
+        npz_path = _make_eval_npz(tmp_path, timesteps, results, lengths, successes)
+        # Last eval at 50000, requested 60000 — simulates normal completion
+        summary = summarise_eval_log(npz_path, requested_timesteps=60000, stop_reason="completed")
+
+        assert "100% success" not in summary
+        assert "Early stopped" not in summary
+        assert "success_rate" in summary
+        assert "0%" in summary
+
+    def test_success_stop_reason_annotates_correctly(self, tmp_path):
+        """stop_reason='success' should annotate early stop for success."""
+        n_checkpoints = 3
+        n_eps = 10
+        timesteps = [10000 * (i + 1) for i in range(n_checkpoints)]
+        results = [[1.0] * n_eps for _ in range(n_checkpoints)]
+        lengths = [[200] * n_eps for _ in range(n_checkpoints)]
+        successes = [[True] * n_eps for _ in range(n_checkpoints)]
+
+        npz_path = _make_eval_npz(tmp_path, timesteps, results, lengths, successes)
+        summary = summarise_eval_log(npz_path, requested_timesteps=100000, stop_reason="success")
+
+        assert "Early stopped (success)" in summary
+        assert "100% success rate reached" in summary
+
+    def test_stagnated_stop_reason_annotates_correctly(self, tmp_path):
+        """stop_reason='stagnated' should annotate stagnation, not success."""
+        n_checkpoints = 3
+        n_eps = 10
+        timesteps = [10000 * (i + 1) for i in range(n_checkpoints)]
+        results = [[0.05] * n_eps for _ in range(n_checkpoints)]
+        lengths = [[500] * n_eps for _ in range(n_checkpoints)]
+        successes = [[False] * n_eps for _ in range(n_checkpoints)]
+
+        npz_path = _make_eval_npz(tmp_path, timesteps, results, lengths, successes)
+        summary = summarise_eval_log(npz_path, requested_timesteps=100000, stop_reason="stagnated")
+
+        assert "Early stopped (stagnated)" in summary
+        assert "100% success" not in summary
+
+    def test_success_rate_column_values(self, tmp_path):
+        """Success rate column should show correct percentages per checkpoint."""
+        n_eps = 10
+        timesteps = [10000, 20000, 30000]
+        results = [[0.5] * n_eps] * 3
+        lengths = [[400] * n_eps] * 3
+        # 0%, 50%, 100% success rates
+        successes = [
+            [False] * n_eps,
+            [True] * 5 + [False] * 5,
+            [True] * n_eps,
+        ]
+
+        npz_path = _make_eval_npz(tmp_path, timesteps, results, lengths, successes)
+        summary = summarise_eval_log(npz_path)
+
+        lines = summary.split("\n")
+        # Data rows start after header (6 header lines: title, episodes, timesteps, blank, header, separator)
+        data_lines = [l for l in lines if l.startswith("|") and "timestep" not in l and "---" not in l]
+        assert len(data_lines) == 3
+        assert "0%" in data_lines[0]
+        assert "50%" in data_lines[1]
+        assert "100%" in data_lines[2]
+
+    def test_none_stop_reason_no_annotation(self, tmp_path):
+        """stop_reason=None with last eval < requested should not annotate."""
+        n_eps = 5
+        timesteps = [5000, 10000]
+        results = [[0.1] * n_eps] * 2
+        lengths = [[500] * n_eps] * 2
+        successes = [[False] * n_eps] * 2
+
+        npz_path = _make_eval_npz(tmp_path, timesteps, results, lengths, successes)
+        summary = summarise_eval_log(npz_path, requested_timesteps=20000, stop_reason=None)
+
+        assert "Early stopped" not in summary
+        assert "100% success" not in summary

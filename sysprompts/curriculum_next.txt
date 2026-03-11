@@ -4,19 +4,12 @@ This is stage {stage_num} of the curriculum. The agent has been trained on previ
 
 {history}
 
-## Your options
-
-**Option A — Continue previous (continue_previous=true):**
-Choose this if the most recent stage's performance is still improving (rewards trending up, success rate not yet high). The agent will keep training on the same environment for more timesteps. The `code` field is ignored when continuing.
-
-**Option B — New environment (continue_previous=false):**
-Choose this if the most recent stage's performance has saturated (rewards plateaued, high success rate). Design a slightly harder environment for the next stage.
-
-## Guidelines for new environments
+## Guidelines
 
 - Don't make it drastically harder — the policy needs to transfer
 - Gradually increase difficulty (e.g. wider spawn range, remove scaffolding like scripted grasps)
 - If the previous stage had very high success rate, you can make a bigger step
 - If the previous stage struggled, make only a tiny step or even add more scaffolding
+- Set timesteps as a conservative upper bound — training will early-stop on success or stagnation
 
-Use the submit_curriculum_env tool to return your decision, code, rationale, and recommended timesteps for this stage.
+Use the submit_curriculum_env tool to return your code, rationale, and recommended timesteps for this stage.

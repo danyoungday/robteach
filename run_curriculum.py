@@ -14,6 +14,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from generate_curriculum import (
+    append_error_to_messages,
     generate_first_stage,
     generate_next_stage,
     summarise_eval_log,
@@ -29,27 +30,26 @@ def _detect_completed_stages(output_dir: Path) -> int:
     return stage
 
 
-def _load_stage_state(stage_dir: Path) -> tuple[str, str]:
-    """Read prev_code and prev_rationale from a completed stage."""
-    code = (stage_dir / "curriculum_env.py").read_text()
-    rationale = (stage_dir / "rationale.txt").read_text()
-    return code, rationale
-
-
 def _load_stage_history_entry(stage_dir: Path, stage_num: int) -> dict:
     """Load a completed stage's data as a history entry dict."""
     code = (stage_dir / "curriculum_env.py").read_text()
     rationale = (stage_dir / "rationale.txt").read_text()
     eval_npz = stage_dir / "eval" / "evaluations.npz"
+    ts_file = stage_dir / "timesteps.txt"
+    requested_ts = int(ts_file.read_text().strip()) if ts_file.exists() else None
+    stop_reason_file = stage_dir / "stop_reason.txt"
+    stop_reason = stop_reason_file.read_text().strip() if stop_reason_file.exists() else None
     if eval_npz.exists():
-        eval_summary = summarise_eval_log(str(eval_npz))
+        eval_summary = summarise_eval_log(str(eval_npz), requested_timesteps=requested_ts, stop_reason=stop_reason)
     else:
         eval_summary = "(no evaluation data available)"
     return {
         "stage_num": stage_num,
+        "stage_dir": stage_dir,
         "code": code,
         "rationale": rationale,
         "eval_summary": eval_summary,
+        "stop_reason": stop_reason,
     }
 
 
@@ -74,74 +74,113 @@ def validate_curriculum_env(py_path: str, cfg: dict) -> str | None:
         return traceback.format_exc()
 
 
-def run_curriculum(
-    config_path: str | None,
-    n_stages: int,
-    output_dir: str,
-    model: str = "claude-opus-4-6",
-    max_retries: int = 3,
-    resume: bool = False,
-    history_k: int = 3,
-):
-    output_dir = Path(output_dir)
-    start_stage = 0
-    prev_stage_dir = None
-    stage_history: list[dict] = []
+class CurriculumRunner:
+    """Manages state and execution for a multi-stage curriculum run."""
 
-    if resume:
-        saved_config = output_dir / "base_config.yaml"
-        assert saved_config.exists(), f"No base_config.yaml found in {output_dir}"
-        base_cfg = load_config(str(saved_config))
-        start_stage = _detect_completed_stages(output_dir)
-        print(f"Detected {start_stage} completed stage(s), resuming from stage {start_stage}")
-        if start_stage > 0:
-            prev_stage_dir = output_dir / f"stage_{start_stage - 1}"
-            # Load last k completed stages into history
-            history_start = max(0, start_stage - history_k)
-            for s in range(history_start, start_stage):
-                entry = _load_stage_history_entry(output_dir / f"stage_{s}", s)
-                stage_history.append(entry)
-    else:
-        assert config_path is not None, "config_path is required when not resuming"
-        base_cfg = load_config(config_path)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(config_path, output_dir / "base_config.yaml")
+    def __init__(
+        self,
+        config_path: str | None,
+        n_stages: int,
+        output_dir: str,
+        model: str = "claude-opus-4-6",
+        max_retries: int = 3,
+        resume: bool = False,
+    ):
+        self.n_stages = n_stages
+        self.model = model
+        self.max_retries = max_retries
 
-    for stage in range(start_stage, n_stages):
-        stage_dir = output_dir / f"stage_{stage}"
-        stage_dir.mkdir(parents=True, exist_ok=True)
+        # Mutable per-stage state
+        self.output_dir = Path(output_dir)
+        self.start_stage = 0
+        self.stage_history: list[dict] = []
+
+        # If we are resuming a run, detect completed stages and load this config and history.
+        # Otherwise, load config from provided path and prepare an empty directory to save to.
+        if resume:
+            saved_config = self.output_dir / "base_config.yaml"
+            assert saved_config.exists(), f"No base_config.yaml found in {self.output_dir}"
+            self.base_cfg = load_config(str(saved_config))
+            self.start_stage = _detect_completed_stages(self.output_dir)
+            print(f"Detected {self.start_stage} completed stage(s), resuming from stage {self.start_stage}")
+            if self.start_stage > 0:
+                for s in range(self.start_stage):
+                    entry = _load_stage_history_entry(self.output_dir / f"stage_{s}", s)
+                    self.stage_history.append(entry)
+        else:
+            assert config_path is not None, "config_path is required when not resuming"
+            self.base_cfg = load_config(config_path)
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(config_path, self.output_dir / "base_config.yaml")
+
+        self.llm_log_path = str(self.output_dir / "llm_calls.log")
+
+    def _get_resume_from(self) -> dict | None:
+        """Find the last non-stagnated stage checkpoint to resume from."""
+        for entry in reversed(self.stage_history):
+            if entry["stop_reason"] != "stagnated":
+                best_dir = entry["stage_dir"] / "best"
+                return {
+                    "ppo_path": str(best_dir / "best_model"),
+                    "vec_norm_path": str(best_dir / "vec_normalize.pkl"),
+                }
+        return None
+
+    def run(self):
+        """Execute the main stage loop."""
+        for stage in range(self.start_stage, self.n_stages):
+            stage_dir = self.output_dir / f"stage_{stage}"
+            stage_dir.mkdir(parents=True, exist_ok=True)
+            print(f"\n{'='*60}")
+            print(f"STAGE {stage}")
+            print(f"{'='*60}")
+
+            self._run_stage(stage, stage_dir)
+
+            self.stage_history.append(_load_stage_history_entry(stage_dir, stage))
+
         print(f"\n{'='*60}")
-        print(f"STAGE {stage}")
+        print(f"Curriculum complete! {self.n_stages} stages in {self.output_dir}")
         print(f"{'='*60}")
 
-        # Generate environment code
+    def _generate_and_validate_code(
+        self, stage: int, stage_dir: Path, previous_messages: list[dict] | None,
+    ) -> tuple[dict, list[dict]]:
+        """Run the LLM generate -> validate retry loop.
+
+        Returns (result, previous_messages).  Calls sys.exit(1) if retries exhausted.
+        """
         attempts_dir = stage_dir / "attempts"
         attempts_dir.mkdir(parents=True, exist_ok=True)
 
-        for attempt in range(max_retries):
+        for attempt in range(self.max_retries):
             attempt_dir = attempts_dir / f"attempt_{attempt}"
             attempt_dir.mkdir(parents=True, exist_ok=True)
 
             try:
                 if stage == 0:
                     print("Generating first stage environment...")
-                    result = generate_first_stage(cfg=base_cfg, model=model)
+                    result, previous_messages = generate_first_stage(
+                        cfg=self.base_cfg, model=self.model,
+                        previous_messages=previous_messages,
+                        log_path=self.llm_log_path,
+                    )
                 else:
                     print(f"Generating stage {stage} environment...")
-                    result = generate_next_stage(
+                    result, previous_messages = generate_next_stage(
                         stage_num=stage,
-                        history=stage_history[-history_k:],
-                        cfg=base_cfg,
-                        model=model,
+                        history=list(self.stage_history),
+                        cfg=self.base_cfg,
+                        model=self.model,
+                        previous_messages=previous_messages,
+                        log_path=self.llm_log_path,
                     )
             except Exception as e:
-                print(f"  LLM call failed (attempt {attempt+1}/{max_retries}): {e}")
+                print(f"  LLM call failed (attempt {attempt+1}/{self.max_retries}): {e}")
                 (attempt_dir / "error.txt").write_text(traceback.format_exc())
-                if attempt == max_retries - 1:
+                if attempt == self.max_retries - 1:
                     raise
                 continue
-
-            is_continue = result.get("continue_previous", False) and stage > 0
 
             # Save attempt files
             attempt_env_path = attempt_dir / "curriculum_env.py"
@@ -152,73 +191,76 @@ def run_curriculum(
             print(f"  Rationale: {result['rationale']}")
             print(f"  Timesteps: {result['timesteps']:,}")
 
-            if is_continue:
-                print("  Continuing previous environment (skipping validation).")
-                # Copy env from previous stage
-                prev_env = prev_stage_dir / "curriculum_env.py"
-                shutil.copy2(prev_env, stage_dir / "curriculum_env.py")
+            print("  Validating environment...")
+            error = validate_curriculum_env(str(attempt_env_path), self.base_cfg)
+            if error is None:
+                print("  Validation passed.")
+                shutil.copy2(attempt_env_path, stage_dir / "curriculum_env.py")
                 (stage_dir / "rationale.txt").write_text(result["rationale"])
                 (stage_dir / "timesteps.txt").write_text(str(result["timesteps"]))
                 break
             else:
-                # Validate new environment
-                print("  Validating environment...")
-                error = validate_curriculum_env(str(attempt_env_path), base_cfg)
-                if error is None:
-                    print("  Validation passed.")
-                    # Copy winning attempt to stage dir
-                    shutil.copy2(attempt_env_path, stage_dir / "curriculum_env.py")
-                    (stage_dir / "rationale.txt").write_text(result["rationale"])
-                    (stage_dir / "timesteps.txt").write_text(str(result["timesteps"]))
-                    break
+                print(f"  Validation failed (attempt {attempt+1}/{self.max_retries}):")
+                print(f"  {error[:500]}")
+                (attempt_dir / "error.txt").write_text(error)
+                if attempt < self.max_retries - 1:
+                    print("  Retrying with error feedback...")
+                    error_with_code = (
+                        f"Your submitted code:\n```python\n{result['code']}\n```\n\n"
+                        f"Validation error:\n{error}"
+                    )
+                    previous_messages = append_error_to_messages(
+                        previous_messages, error_with_code
+                    )
                 else:
-                    print(f"  Validation failed (attempt {attempt+1}/{max_retries}):")
-                    print(f"  {error[:500]}")
-                    (attempt_dir / "error.txt").write_text(error)
-                    if attempt < max_retries - 1:
-                        print("  Retrying with error feedback...")
-                    else:
-                        print(f"  FATAL: Could not generate valid env after {max_retries} attempts.")
-                        sys.exit(1)
+                    print(f"  FATAL: Could not generate valid env after {self.max_retries} attempts.")
+                    sys.exit(1)
 
-        # Train
-        stage_cfg = deepcopy(base_cfg)
+        return result, previous_messages
+
+    def _train_stage(self, stage: int, stage_dir: Path, timesteps: int) -> str:
+        """Deep-copy config, train, write stop_reason.txt.  Returns the stop reason."""
+        stage_cfg = deepcopy(self.base_cfg)
         stage_cfg["save_dir"] = str(stage_dir)
-        stage_cfg["total_timesteps"] = result["timesteps"]
+        stage_cfg["total_timesteps"] = timesteps
 
-        resume_from = str(prev_stage_dir) if prev_stage_dir is not None else None
+        resume_from = self._get_resume_from()
         env_cls_path = str(stage_dir / "curriculum_env.py")
 
-        print(f"\n  Training stage {stage} for {result['timesteps']:,} timesteps...")
+        print(f"\n  Training stage {stage} for {timesteps:,} timesteps...")
         if resume_from:
-            print(f"  Resuming from: {resume_from}")
+            print(f"  Resuming from: {resume_from['ppo_path']}")
 
-        train(
+        train_result = train(
             stage_cfg,
             config_path=None,
             resume_from=resume_from,
             env_cls_path=env_cls_path,
         )
 
-        # Build history entry for this stage
-        eval_npz = stage_dir / "eval" / "evaluations.npz"
-        if eval_npz.exists():
-            eval_summary = summarise_eval_log(str(eval_npz))
-        else:
-            eval_summary = "(no evaluation data available)"
-        env_code = (stage_dir / "curriculum_env.py").read_text()
-        stage_history.append({
-            "stage_num": stage,
-            "code": env_code,
-            "rationale": result["rationale"],
-            "eval_summary": eval_summary,
-        })
+        stop_reason = train_result["stop_reason"]
+        (stage_dir / "stop_reason.txt").write_text(stop_reason)
+        return stop_reason
 
-        prev_stage_dir = stage_dir
+    def _run_stage(self, stage: int, stage_dir: Path) -> None:
+        """Generate, validate, and train a single stage."""
+        result, _ = self._generate_and_validate_code(stage, stage_dir, previous_messages=None)
+        self._train_stage(stage, stage_dir, result["timesteps"])
 
-    print(f"\n{'='*60}")
-    print(f"Curriculum complete! {n_stages} stages in {output_dir}")
-    print(f"{'='*60}")
+
+def run_curriculum(
+    config_path: str | None,
+    n_stages: int,
+    output_dir: str,
+    model: str = "claude-opus-4-6",
+    max_retries: int = 3,
+    resume: bool = False,
+):
+    runner = CurriculumRunner(
+        config_path, n_stages, output_dir, model=model, max_retries=max_retries,
+        resume=resume,
+    )
+    runner.run()
 
 
 def main():
@@ -232,8 +274,6 @@ def main():
                         help="Claude model to use for generation")
     parser.add_argument("--resume", type=str, default=None, metavar="DIR",
                         help="Resume from an existing output directory")
-    parser.add_argument("--history", type=int, default=3,
-                        help="Number of recent stages to show the LLM (default: 3)")
     args = parser.parse_args()
 
     if args.resume:
@@ -246,7 +286,6 @@ def main():
             output_dir=output_dir,
             model=args.model,
             resume=True,
-            history_k=args.history,
         )
     else:
         if not args.config:
@@ -257,7 +296,6 @@ def main():
             n_stages=args.stages,
             output_dir=output_dir,
             model=args.model,
-            history_k=args.history,
         )
 
 

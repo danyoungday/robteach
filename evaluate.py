@@ -30,7 +30,7 @@ def evaluate_checkpoint(
     checkpoint: str,
     n_episodes: int = 50,
     config_override: str | None = None,
-    seed: int | None = None,
+    seed: int = 42,
 ) -> dict:
     """Run n_episodes on default Lift and return results dict."""
     config_path = _find_config(checkpoint, config_override)
@@ -52,8 +52,12 @@ def evaluate_checkpoint(
     rewards = []
     successes = []
 
+    # Generate random seed for each episode using the provided seed
+    np.random.seed(seed)
+    seeds = np.random.randint(0, 2**32-1, size=n_episodes)
+
     for ep in range(1, n_episodes + 1):
-        obs = vec_env.reset()
+        obs = vec_env.reset(seed=seeds[ep-1])
         episode_reward = 0.0
         done = False
         steps = 0
