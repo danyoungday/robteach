@@ -7,23 +7,27 @@ Usage:
 """
 
 import argparse
+import os
 
 import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
 from enjoy import _find_config, _find_vec_normalize
 from robosuite_env import RobosuiteGymEnv
 from train_ppo import load_config
 
 
-def _make_default_lift_env(cfg: dict) -> DummyVecEnv:
-    """Create a single default Lift env wrapped in Monitor + DummyVecEnv."""
+def _make_default_lift_env(cfg: dict, n_envs: int = 1):
+    """Create default Lift env(s) wrapped in Monitor + VecEnv."""
     def _make():
         env = RobosuiteGymEnv("Lift", robots=cfg["robots"], **cfg["env_kwargs"])
         return Monitor(env)
-    return DummyVecEnv([_make])
+    factories = [_make for _ in range(n_envs)]
+    if n_envs == 1:
+        return DummyVecEnv(factories)
+    return SubprocVecEnv(factories, start_method="forkserver")
 
 
 def evaluate_checkpoint(
@@ -31,15 +35,22 @@ def evaluate_checkpoint(
     n_episodes: int = 50,
     config_override: str | None = None,
     seed: int = 42,
+    n_envs: int | None = None,
 ) -> dict:
     """Run n_episodes on default Lift and return results dict."""
     config_path = _find_config(checkpoint, config_override)
     cfg = load_config(config_path)
+
+    if n_envs is None:
+        n_envs = min(n_episodes, os.cpu_count() or 1)
+    n_envs = min(n_envs, n_episodes)
+
     print(f"\n{'='*60}")
     print(f"Checkpoint: {checkpoint}")
     print(f"Config:     {config_path}")
+    print(f"Parallel:   {n_envs} envs")
 
-    vec_env = _make_default_lift_env(cfg)
+    vec_env = _make_default_lift_env(cfg, n_envs=n_envs)
 
     norm_file = _find_vec_normalize(checkpoint)
     vec_env = VecNormalize.load(str(norm_file), vec_env)
@@ -49,32 +60,27 @@ def evaluate_checkpoint(
 
     model = PPO.load(checkpoint)
 
+    vec_env.seed([seed + i for i in range(n_envs)])
+    obs = vec_env.reset()
+    ep_rewards = np.zeros(n_envs)
+    ep_steps = np.zeros(n_envs, dtype=int)
     rewards = []
     successes = []
 
-    # Generate random seed for each episode using the provided seed
-    np.random.seed(seed)
-    seeds = np.random.randint(0, 2**32-1, size=n_episodes)
-
-    for ep in range(1, n_episodes + 1):
-        obs = vec_env.reset(seed=seeds[ep-1])
-        episode_reward = 0.0
-        done = False
-        steps = 0
-
-        while not done:
-            action, _ = model.predict(obs, deterministic=True)
-            obs, reward, dones, infos = vec_env.step(action)
-            episode_reward += reward[0]
-            steps += 1
-            done = dones[0]
-
-        success = infos[0].get("is_success", False)
-        rewards.append(episode_reward)
-        successes.append(success)
-
-        status = "SUCCESS" if success else "FAIL"
-        print(f"  Ep {ep:3d}/{n_episodes}  [{status}]  steps={steps:4d}  reward={episode_reward:.2f}")
+    while len(rewards) < n_episodes:
+        action, _ = model.predict(obs, deterministic=True)
+        obs, reward, dones, infos = vec_env.step(action)
+        ep_rewards += reward
+        ep_steps += 1
+        for i in range(n_envs):
+            if dones[i] and len(rewards) < n_episodes:
+                success = infos[i].get("is_success", False)
+                rewards.append(ep_rewards[i])
+                successes.append(success)
+                ep_num = len(rewards)
+                print(f"  Ep {ep_num:3d}/{n_episodes}  [{'SUCCESS' if success else 'FAIL'}]  steps={ep_steps[i]:4d}  reward={ep_rewards[i]:.2f}")
+                ep_rewards[i] = 0.0
+                ep_steps[i] = 0
 
     vec_env.close()
 
@@ -101,11 +107,13 @@ def main():
     parser.add_argument("--episodes", type=int, default=50)
     parser.add_argument("--config", default=None, help="Config override (auto-detected if omitted)")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--n-envs", type=int, default=None,
+                        help="Parallel eval envs (default: min(episodes, cpu_count))")
     args = parser.parse_args()
 
     all_results = []
     for ckpt in args.checkpoints:
-        results = evaluate_checkpoint(ckpt, args.episodes, args.config, args.seed)
+        results = evaluate_checkpoint(ckpt, args.episodes, args.config, args.seed, args.n_envs)
         all_results.append(results)
 
     if len(all_results) > 1:

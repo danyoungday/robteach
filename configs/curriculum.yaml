@@ -41,10 +41,10 @@ total_timesteps: 0
 save_dir: "lorem ipsum dolor"
 checkpoint_freq: 1_000_000
 eval_freq: 100_000
-n_eval_episodes: 10
+n_eval_episodes: 50
 early_stop: true
 success_stop_threshold: 0.9
-max_no_improvement_evals: 5   # stop if no reward improvement for this many evals
+max_no_improvement_evals: 10   # stop if no reward improvement for this many evals
 min_evals_before_stagnation: 2 # warmup evals before checking for stagnation
 stagnation_success_threshold: 0.7  # stagnation above this success rate counts as success
 
