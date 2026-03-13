@@ -58,6 +58,7 @@ def validate_curriculum_env(py_path: str, cfg: dict) -> str | None:
 
     Returns None on success or an error string on failure.
     """
+    env = None
     try:
         from stable_baselines3 import PPO
         env = make_vec_env(cfg, n_envs=2, env_cls_path=py_path)
@@ -68,10 +69,12 @@ def validate_curriculum_env(py_path: str, cfg: dict) -> str | None:
                 **cfg["ppo_kwargs"],
             )
             model.learn(total_timesteps=cfg["ppo_kwargs"]["n_steps"] * 2)
-        env.close()
         return None
     except Exception:
         return traceback.format_exc()
+    finally:
+        if env is not None:
+            env.close()
 
 
 class CurriculumRunner:

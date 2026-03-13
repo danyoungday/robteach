@@ -7,3 +7,5 @@ results/
 old/
 old2/
 wandb/
+figures/
+nohup.out

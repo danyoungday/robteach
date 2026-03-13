@@ -237,6 +237,7 @@ def train(cfg: dict, config_path: str | None = None, resume_from: dict | None = 
             )
         )
 
+    eval_env = None
     stop_callback = None
     if cfg["eval_freq"] > 0:
         n_eval_envs = min(cfg.get("n_eval_episodes", 10), n_envs)
@@ -280,6 +281,8 @@ def train(cfg: dict, config_path: str | None = None, resume_from: dict | None = 
     print(f"Saved → {out_path}.zip + vec_normalize.pkl")
 
     env.close()
+    if eval_env is not None:
+        eval_env.close()
 
     if wandb_active:
         wandb.finish()

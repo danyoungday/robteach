@@ -60,7 +60,7 @@ def evaluate_checkpoint(
 
     model = PPO.load(checkpoint)
 
-    vec_env.seed([seed + i for i in range(n_envs)])
+    vec_env.seed(seed)
     obs = vec_env.reset()
     ep_rewards = np.zeros(n_envs)
     ep_steps = np.zeros(n_envs, dtype=int)

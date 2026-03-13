@@ -37,11 +37,11 @@ ppo_kwargs:
       pi: [256, 256]
       vf: [256, 256]
 
-total_timesteps: 5_000_000
-save_dir: "results/baseline-forreal"
+total_timesteps: 50_000_000
+save_dir: "results/baseline-reallyforreal"
 checkpoint_freq: 1_000_000
-eval_freq: 50_000
-n_eval_episodes: 10
+eval_freq: 100_000
+n_eval_episodes: 50
 early_stop: false
 
 wandb:

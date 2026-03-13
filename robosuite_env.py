@@ -53,10 +53,23 @@ class RobosuiteGymEnv(gym.Env):
         return np.concatenate(arrays).astype(np.float32)
 
     # ------------------------------------------------------------------
+    def _seed_sampler(self, sampler, rng):
+        """Recursively set rng on a placement sampler and any sub-samplers."""
+        sampler.rng = rng
+        if hasattr(sampler, "samplers"):  # SequentialCompositeSampler
+            for sub in sampler.samplers.values():
+                self._seed_sampler(sub, rng)
+
+    # ------------------------------------------------------------------
     # Gymnasium interface
     # ------------------------------------------------------------------
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
+        if seed is not None:
+            rng = np.random.default_rng(seed)
+            self.env.rng = rng
+            if hasattr(self.env, "placement_initializer") and self.env.placement_initializer is not None:
+                self._seed_sampler(self.env.placement_initializer, rng)
         obs = self.env.reset()
         return self._flatten_obs(obs), {}
 
@@ -65,10 +78,11 @@ class RobosuiteGymEnv(gym.Env):
         obs, reward, done, info = self.env.step(action)
         if hasattr(self.env, "_check_success"):
             info["is_success"] = self.env._check_success()
-        return self._flatten_obs(obs), float(reward), bool(done), False, info
+        return self._flatten_obs(obs), float(reward), False, bool(done), info
 
     def render(self):
         self.env.render()
 
     def close(self):
         self.env.close()
+        super().close()

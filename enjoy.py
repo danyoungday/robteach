@@ -62,8 +62,9 @@ def _find_config(checkpoint: str, cli_config: str | None = None) -> str:
     """Locate config.yaml saved alongside the checkpoint, or fall back to CLI arg."""
     ckpt = Path(checkpoint).with_suffix("")
     candidates = [
-        ckpt.parent / "config.yaml",
-        ckpt.parent.parent / "config.yaml",
+        ckpt.parent / "base_config.yaml",
+        ckpt.parent.parent / "base_config.yaml",
+        ckpt.parent.parent.parent / "base_config.yaml"
     ]
     for p in candidates:
         if p.exists():
