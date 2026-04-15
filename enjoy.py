@@ -37,8 +37,8 @@ def _find_vec_normalize(checkpoint: str) -> Path:
     )
 
 
-def _find_env_cls_path(checkpoint: str, cli_override: str | None = None) -> str:
-    """Resolve the env class path: CLI override > nearby curriculum_env.py > baseline_env.py."""
+def _find_env_cls_path(checkpoint: str, cli_override: str | None = None) -> str | None:
+    """Resolve the env class path: CLI override > nearby curriculum_env.py > None (use default)."""
     if cli_override is not None:
         return cli_override
     ckpt = Path(checkpoint).with_suffix("")
@@ -50,7 +50,7 @@ def _find_env_cls_path(checkpoint: str, cli_override: str | None = None) -> str:
     for p in candidates:
         if p.exists():
             return str(p)
-    return str(PROJECT_ROOT / "baseline_env.py")
+    return None
 
 
 def _get_robosuite_env(vec_env):
@@ -85,7 +85,7 @@ def run(checkpoint: str, n_episodes: int = 10, config_override: str | None = Non
     print(f"Loaded config from {config_path}")
 
     env_cls_path = _find_env_cls_path(checkpoint, env_cls_path_override)
-    print(f"Using env class from {env_cls_path}")
+    print(f"Using env class from {env_cls_path or 'default (RobosuiteGymEnv)'}")
 
     model = PPO.load(checkpoint)
 

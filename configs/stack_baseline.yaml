@@ -1,5 +1,5 @@
 robots: "Panda"
-env_name: "Lift"
+env_name: "Stack"
 
 env_kwargs:
   has_renderer: false
@@ -8,7 +8,7 @@ env_kwargs:
   use_camera_obs: false
   reward_shaping: true
   control_freq: 20
-  horizon: 500
+  horizon: 1000
   hard_reset: false
 
 n_envs: "auto"
@@ -38,7 +38,7 @@ ppo_kwargs:
       vf: [256, 256]
 
 total_timesteps: 50_000_000
-save_dir: "results/baseline-reallyforreal"
+save_dir: "results/stack-baseline"
 checkpoint_freq: 1_000_000
 eval_freq: 100_000
 n_eval_episodes: 50
@@ -47,3 +47,6 @@ early_stop: false
 wandb:
   project: "robosuite"   # user fills this in
   entity: null  # optional, uses default entity if null
+  tags:
+    - stack
+    - baseline

@@ -1,5 +1,7 @@
 robots: "Panda"
 env_name: "Lift"
+base_env_path: "/home/danyoungday/miniconda3/envs/robosuite/lib/python3.10/site-packages/robosuite/environments/manipulation/lift.py"
+env_cls_path: ""
 
 env_kwargs:
   has_renderer: false
@@ -37,12 +39,9 @@ ppo_kwargs:
       pi: [256, 256]
       vf: [256, 256]
 
-total_timesteps: 50_000_000
-save_dir: "results/baseline-reallyforreal"
 checkpoint_freq: 1_000_000
 eval_freq: 100_000
 n_eval_episodes: 50
-early_stop: false
 
 wandb:
   project: "robosuite"   # user fills this in

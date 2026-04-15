@@ -1,5 +1,7 @@
 robots: "Panda"
-env_cls_path: "lorem ipsum dolor"
+env_name: "Stack"
+base_env_path: "/home/danyoungday/miniconda3/envs/robosuite/lib/python3.10/site-packages/robosuite/environments/manipulation/stack.py"
+env_cls_path: ""
 
 env_kwargs:
   has_renderer: false
@@ -8,7 +10,7 @@ env_kwargs:
   use_camera_obs: false
   reward_shaping: true
   control_freq: 20
-  horizon: 500
+  horizon: 1000
   hard_reset: false
 
 n_envs: "auto"
@@ -37,17 +39,13 @@ ppo_kwargs:
       pi: [256, 256]
       vf: [256, 256]
 
-total_timesteps: 0
-save_dir: "lorem ipsum dolor"
 checkpoint_freq: 1_000_000
 eval_freq: 100_000
 n_eval_episodes: 50
-early_stop: true
-success_stop_threshold: 0.9
-max_no_improvement_evals: 10   # stop if no reward improvement for this many evals
-min_evals_before_stagnation: 2 # warmup evals before checking for stagnation
-stagnation_success_threshold: 0.7  # stagnation above this success rate counts as success
 
 wandb:
   project: "robosuite"   # user fills this in
   entity: null  # optional, uses default entity if null
+  tags:
+    - stack
+    - curriculum

@@ -7,74 +7,57 @@ Usage:
 
 import importlib.util
 import os
+from pathlib import Path
 import shutil
 import sys
 
-import torch
-torch.set_num_threads(1)  # prevent PyTorch from fighting SubprocVecEnv workers for cores
-
-from pathlib import Path
-
 import numpy as np
-import yaml
-from torch import nn
-
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
-
+import torch
+from torch import nn
 import wandb
 from wandb.integration.sb3 import WandbCallback
+import yaml
+
+from robosuite_env import RobosuiteGymEnv
+
+
+torch.set_num_threads(1)  # prevent PyTorch from fighting SubprocVecEnv workers for cores
+
 
 # ── Callbacks ────────────────────────────────────────────────────────────────
 
 
-class StopOnSuccessOrStagnation(BaseCallback):
-    """Stop training on success-rate threshold OR reward stagnation."""
+class StopOnSuccess(BaseCallback):
+    """Stop training when success rate is sustained above threshold.
 
-    def __init__(self, success_threshold: float = 1.0, max_no_improvement_evals: int = 5,
-                 min_evals: int = 0, stagnation_success_threshold: float = 0.7, verbose: int = 0):
+    Tune these if needed:
+      SUCCESS_THRESHOLD — SR to consider the task solved
+      CONSECUTIVE_EVALS — how many evals in a row above threshold before stopping
+    """
+
+    SUCCESS_THRESHOLD = 0.8
+    CONSECUTIVE_EVALS = 5
+
+    def __init__(self, verbose: int = 0):
         super().__init__(verbose)
-        self.success_threshold = success_threshold
-        self.max_no_improvement_evals = max_no_improvement_evals
-        self.min_evals = min_evals
-        self.stagnation_success_threshold = stagnation_success_threshold
         self.stop_reason = None
-        self.n_evals = 0
-        self.no_improvement_evals = 0
-        self.last_best_mean_reward = -np.inf
+        self.consecutive_count = 0
 
     def _on_step(self) -> bool:
         buf = self.parent._is_success_buffer
-        success_rate = np.mean(buf) if len(buf) > 0 else 0.0
+        sr = np.mean(buf) if len(buf) > 0 else 0.0
 
-        # Check hard success threshold
-        if success_rate >= self.success_threshold:
-            if self.verbose:
-                print(f"Early stopping: success rate {success_rate:.2f} >= {self.success_threshold}")
-            self.stop_reason = "success"
-            return False
-
-        # Check stagnation (based on mean reward)
-        self.n_evals += 1
-        if self.n_evals > self.min_evals:
-            if self.parent.best_mean_reward > self.last_best_mean_reward:
-                self.no_improvement_evals = 0
-            else:
-                self.no_improvement_evals += 1
-                if self.no_improvement_evals > self.max_no_improvement_evals:
-                    if success_rate >= self.stagnation_success_threshold:
-                        print(f"Early stopping: reward stagnated but success rate {success_rate:.2f} "
-                                f">= {self.stagnation_success_threshold} — treating as success")
-                        self.stop_reason = "success"
-                    else:
-                        print(f"Early stopping: no reward improvement for "
-                                f"{self.no_improvement_evals} evals "
-                                f"(success rate {success_rate:.2f})")
-                        self.stop_reason = "stagnated"
-                    return False
-        self.last_best_mean_reward = self.parent.best_mean_reward
+        if sr >= self.SUCCESS_THRESHOLD:
+            self.consecutive_count += 1
+            if self.consecutive_count >= self.CONSECUTIVE_EVALS:
+                self.stop_reason = "success"
+                return False
+        else:
+            self.consecutive_count = 0
         return True
 
 
@@ -106,7 +89,7 @@ ACTIVATION_MAP = {
 
 def load_config(path: str) -> dict:
     """Load a YAML config and apply non-serializable transformations."""
-    with open(path) as f:
+    with open(path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
     # n_envs: "auto" → computed from CPU count
@@ -120,14 +103,17 @@ def load_config(path: str) -> dict:
     return cfg
 
 
-def _env_factory(cfg: dict, env_cls_path: str):
+def _env_factory(cfg: dict, env_cls_path: str | None):
     """Returns a callable that creates a single monitored env (picklable for SubprocVecEnv)."""
     def _make():
-        spec = importlib.util.spec_from_file_location("curriculum_env", env_cls_path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        EnvCls = mod.CurriculumEnv
-        env = EnvCls(robots=cfg["robots"], **cfg["env_kwargs"])
+        if env_cls_path:
+            spec = importlib.util.spec_from_file_location("curriculum_env", env_cls_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            EnvCls = mod.CurriculumEnv
+            env = EnvCls(robots=cfg["robots"], **cfg["env_kwargs"])
+        else:
+            env = RobosuiteGymEnv(cfg["env_name"], robots=cfg["robots"], **cfg["env_kwargs"])
         return Monitor(env)
     return _make
 
@@ -188,7 +174,7 @@ def train(cfg: dict, config_path: str | None = None, resume_from: dict | None = 
         # Log the raw YAML config (before load_config transforms)
         log_config = {}
         if config_path is not None:
-            with open(config_path) as f:
+            with open(config_path, "r", encoding="utf-8") as f:
                 log_config = yaml.safe_load(f)
 
         wandb.init(
@@ -197,6 +183,7 @@ def train(cfg: dict, config_path: str | None = None, resume_from: dict | None = 
             config=log_config,
             sync_tensorboard=True,
             save_code=True,
+            tags=wandb_cfg["tags"]
         )
         wandb_active = True
 
@@ -245,14 +232,8 @@ def train(cfg: dict, config_path: str | None = None, resume_from: dict | None = 
         # Freeze eval normalization stats (use training stats, don't update)
         eval_env.training = False
         eval_env.norm_reward = False
-        if cfg.get("early_stop", True):
-            stop_callback = StopOnSuccessOrStagnation(
-                success_threshold=cfg.get("success_stop_threshold", 1.0),
-                max_no_improvement_evals=cfg.get("max_no_improvement_evals", 10),
-                min_evals=cfg.get("min_evals_before_stagnation", 0),
-                stagnation_success_threshold=cfg.get("stagnation_success_threshold", 0.75),
-                verbose=1,
-            )
+        if cfg.get("early_stop", False):
+            stop_callback = StopOnSuccess(verbose=1)
         save_vec_norm_callback = SaveVecNormalizeOnBest(
             save_path=str(save_dir / "best"), verbose=1
         )
@@ -294,7 +275,14 @@ def train(cfg: dict, config_path: str | None = None, resume_from: dict | None = 
     return {"stop_reason": stop_reason}
 
 
-if __name__ == "__main__":
+def main():
+    """
+    Main logic loads config and calls train
+    """
     config_path = sys.argv[1] if len(sys.argv) > 1 else "configs/basic.yaml"
     cfg = load_config(config_path)
-    train(cfg, config_path, env_cls_path=cfg["env_cls_path"])
+    train(cfg, config_path, env_cls_path=cfg.get("env_cls_path", ""))
+
+
+if __name__ == "__main__":
+    main()

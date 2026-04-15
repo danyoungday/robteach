@@ -1,7 +1,7 @@
 """Generate curriculum stage environments using Claude.
 
 Each call produces a complete Python file defining a CurriculumEnv class
-that wraps the robosuite Lift task via RobosuiteGymEnv.
+that wraps a robosuite task via RobosuiteGymEnv.
 """
 
 import json
@@ -10,7 +10,6 @@ from pathlib import Path
 from string import Template
 
 import anthropic
-import numpy as np
 
 PROMPTS_DIR = Path(__file__).parent / "sysprompts"
 
@@ -28,12 +27,8 @@ CURRICULUM_TOOL = {
                 "type": "string",
                 "description": "Short explanation of the design choices for this stage.",
             },
-            "timesteps": {
-                "type": "integer",
-                "description": "Recommended total training timesteps for this stage. The system prompt shows how many policy updates this translates to given the current parallelism settings.",
-            },
         },
-        "required": ["code", "rationale", "timesteps"],
+        "required": ["code", "rationale"],
     },
 }
 
@@ -43,76 +38,59 @@ def _load_prompt(name: str) -> str:
 
 
 def _build_system_prompt(cfg: dict) -> str:
-    """Load curriculum_system.txt and substitute training config variables."""
+    """Load curriculum_system.txt and substitute config variables."""
     raw = _load_prompt("curriculum_system.txt")
-    n_envs = cfg["n_envs"]
-    n_steps = cfg["ppo_kwargs"]["n_steps"]
-    steps_per_update = n_envs * n_steps
+
+    # Read and escape source files ($ must be escaped for Template.substitute)
+    base_env_source = Path(cfg["base_env_path"]).read_text().replace("$", "$$")
+    wrapper_source = (Path(__file__).parent / "robosuite_env.py").read_text().replace("$", "$$")
+
     return Template(raw).substitute(
-        n_envs=n_envs,
-        n_steps=n_steps,
-        batch_size=cfg["ppo_kwargs"]["batch_size"],
-        n_epochs=cfg["ppo_kwargs"]["n_epochs"],
-        horizon=cfg["env_kwargs"]["horizon"],
-        steps_per_update=steps_per_update,
+        env_name=cfg["env_name"],
+        base_env_source=base_env_source,
+        wrapper_source=wrapper_source,
     )
 
 
 def _format_history(history: list[dict]) -> str:
-    """Format a list of stage history entries for the LLM prompt."""
-    sections = []
+    """Format stage history for the LLM: base-env trajectory, summaries, and code for most recent."""
+    if not history:
+        return "(no previous stages)"
+
+    # Base-env SR trajectory
+    base_rates = ["0%"]
     for entry in history:
-        section = (
-            f"### Stage {entry['stage_num']}\n\n"
-            f"**Environment code:**\n```python\n{entry['code']}\n```\n\n"
-            f"**Rationale:** {entry['rationale']}\n\n"
-            f"**Evaluation results:**\n{entry['eval_summary']}\n"
-        )
-        sections.append(section)
-    return "\n---\n\n".join(sections)
+        be = entry.get("base_eval")
+        base_rates.append(f"{be['success_rate']:.0%}" if be else "?")
 
+    parts = [f"**Base-env success rate: {' -> '.join(base_rates)}**"]
 
-def summarise_eval_log(npz_path: str, requested_timesteps: int | None = None,
-                       stop_reason: str | None = None) -> str:
-    """Turn an evaluations.npz into a compact text summary for the LLM."""
-    data = np.load(npz_path)
-    timesteps = data["timesteps"]
-    results = data["results"]
-    lengths = data["ep_lengths"]
+    for i, entry in enumerate(history):
+        is_most_recent = (i == len(history) - 1)
+        be = entry.get("base_eval", {})
+        curr_sr = f"{be['success_rate']:.0%}" if be else "?"
+        curriculum_sr = entry.get("curriculum_sr")
+        curriculum_str = f"{curriculum_sr:.0%}" if curriculum_sr is not None else "?"
 
-    successes = data["successes"]
-
-    lines = [
-        "## Previous training run — eval log",
-        f"Eval episodes per checkpoint: {results.shape[1]}",
-        f"Total timesteps trained: {int(timesteps[-1])}",
-        "",
-        "| timestep | mean_reward | std_reward | mean_ep_len | success_rate |",
-        "|----------|-------------|------------|-------------|--------------|",
-    ]
-    for i, ts in enumerate(timesteps):
-        mr = np.mean(results[i])
-        sr = np.std(results[i])
-        ml = np.mean(lengths[i])
-        success_pct = np.mean(successes[i]) * 100
-        lines.append(f"| {int(ts):>8d} | {mr:>11.2f} | {sr:>10.2f} | {ml:>11.0f} | {success_pct:>11.0f}% |")
-
-    summary = "\n".join(lines)
-
-    if requested_timesteps is not None and int(timesteps[-1]) < requested_timesteps:
-        actual = int(timesteps[-1])
-        if stop_reason == "success":
-            summary += (
-                f"\n\n**Early stopped (success)**: 100% success rate reached at "
-                f"{actual:,} / {requested_timesteps:,} timesteps."
+        if is_most_recent:
+            section = (
+                f"### Stage {entry['stage_num']}\n\n"
+                f"Curriculum SR: {curriculum_str}, Base SR: {curr_sr}\n\n"
+                f"**Rationale:** {entry['rationale']}\n\n"
+                f"**Environment code:**\n```python\n{entry['code']}\n```"
             )
-        elif stop_reason == "stagnated":
-            summary += (
-                f"\n\n**Early stopped (stagnated)**: no reward improvement — "
-                f"stopped at {actual:,} / {requested_timesteps:,} timesteps."
+        else:
+            prev_be = history[i - 1].get("base_eval", {}) if i > 0 else {}
+            prev_sr = f"{prev_be['success_rate']:.0%}" if prev_be else "0%"
+            section = (
+                f"### Stage {entry['stage_num']}\n\n"
+                f"**Rationale:** {entry['rationale']}\n"
+                f"Curriculum SR: {curriculum_str}, Base SR: {prev_sr} -> {curr_sr}"
             )
 
-    return summary
+        parts.append(section)
+
+    return "\n\n---\n\n".join(parts)
 
 
 def _format_content_for_log(content) -> str:
@@ -125,7 +103,6 @@ def _format_content_for_log(content) -> str:
             if isinstance(block, dict):
                 parts.append(json.dumps(block, indent=2, default=str))
             else:
-                # anthropic ContentBlock objects
                 parts.append(str(block))
         return "\n".join(parts)
     return str(content)
@@ -165,24 +142,7 @@ def _call_claude(
 ) -> tuple[dict, list[dict]]:
     """Send a request to Claude and extract the tool call result.
 
-    Parameters
-    ----------
-    system : str
-        System prompt.
-    user : str
-        User prompt (ignored when *messages* is provided).
-    model : str
-        Claude model identifier.
-    messages : list[dict] | None
-        Optional pre-built message list (for retries with error context).
-        When ``None``, a single user message is built from *user*.
-    log_path : str | None
-        If set, append a record of this call to the given text file.
-
-    Returns
-    -------
-    tuple[dict, list[dict]]
-        (parsed tool input, full message history including the assistant reply)
+    Returns (parsed tool input, full message history including the assistant reply).
     """
     if messages is None:
         messages = [{"role": "user", "content": user}]
@@ -199,7 +159,6 @@ def _call_claude(
     for block in response.content:
         if block.type == "tool_use" and block.name == "submit_curriculum_env":
             _log_call(log_path, system, messages, block.input, model)
-            # Append assistant response to history
             updated_messages = messages + [
                 {"role": "assistant", "content": response.content}
             ]
@@ -208,12 +167,7 @@ def _call_claude(
 
 
 def append_error_to_messages(messages: list[dict], error: str) -> list[dict]:
-    """Append a ``tool_result`` with ``is_error=True`` to the conversation.
-
-    The ``tool_use_id`` is extracted from the last assistant message so that
-    the API sees the error as the result of the tool call it just made.
-    """
-    # Find the tool_use block in the last assistant message
+    """Append a ``tool_result`` with ``is_error=True`` to the conversation."""
     last_assistant = messages[-1]
     tool_use_id = None
     for block in last_assistant["content"]:
@@ -251,9 +205,9 @@ def generate_first_stage(
 
 
 def generate_next_stage(
-    stage_num: int,
     history: list[dict],
     cfg: dict,
+    decision_context: str = "",
     model: str = "claude-opus-4-6",
     previous_messages: list[dict] | None = None,
     log_path: str | None = None,
@@ -262,7 +216,7 @@ def generate_next_stage(
     system = _build_system_prompt(cfg)
     template = _load_prompt("curriculum_next.txt")
     user = template.format(
-        stage_num=stage_num,
+        decision_context=decision_context,
         history=_format_history(history),
     )
     return _call_claude(system, user, model, messages=previous_messages, log_path=log_path)

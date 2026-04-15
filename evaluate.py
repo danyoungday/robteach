@@ -1,4 +1,4 @@
-"""Evaluate PPO checkpoints on the default (unmodified) robosuite Lift env.
+"""Evaluate PPO checkpoints on the default (unmodified) robosuite env.
 
 Usage:
     python evaluate.py logs/stage_0/ppo_final --episodes 50
@@ -19,10 +19,10 @@ from robosuite_env import RobosuiteGymEnv
 from train_ppo import load_config
 
 
-def _make_default_lift_env(cfg: dict, n_envs: int = 1):
-    """Create default Lift env(s) wrapped in Monitor + VecEnv."""
+def _make_default_env(cfg: dict, n_envs: int = 1):
+    """Create default env(s) wrapped in Monitor + VecEnv."""
     def _make():
-        env = RobosuiteGymEnv("Lift", robots=cfg["robots"], **cfg["env_kwargs"])
+        env = RobosuiteGymEnv(cfg["env_name"], robots=cfg["robots"], **cfg["env_kwargs"])
         return Monitor(env)
     factories = [_make for _ in range(n_envs)]
     if n_envs == 1:
@@ -37,7 +37,7 @@ def evaluate_checkpoint(
     seed: int = 42,
     n_envs: int | None = None,
 ) -> dict:
-    """Run n_episodes on default Lift and return results dict."""
+    """Run n_episodes on default env and return results dict."""
     config_path = _find_config(checkpoint, config_override)
     cfg = load_config(config_path)
 
@@ -50,7 +50,7 @@ def evaluate_checkpoint(
     print(f"Config:     {config_path}")
     print(f"Parallel:   {n_envs} envs")
 
-    vec_env = _make_default_lift_env(cfg, n_envs=n_envs)
+    vec_env = _make_default_env(cfg, n_envs=n_envs)
 
     norm_file = _find_vec_normalize(checkpoint)
     vec_env = VecNormalize.load(str(norm_file), vec_env)
@@ -102,7 +102,7 @@ def evaluate_checkpoint(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate PPO checkpoints on default Lift")
+    parser = argparse.ArgumentParser(description="Evaluate PPO checkpoints on default env")
     parser.add_argument("checkpoints", nargs="+", help="Path(s) to saved model(s)")
     parser.add_argument("--episodes", type=int, default=50)
     parser.add_argument("--config", default=None, help="Config override (auto-detected if omitted)")

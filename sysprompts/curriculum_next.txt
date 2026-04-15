@@ -1,4 +1,4 @@
-This is stage {stage_num} of the curriculum. The agent has been trained on previous stages and will resume from the last checkpoint.
+{decision_context}
 
 ## Previous stage history
 
@@ -6,10 +6,8 @@ This is stage {stage_num} of the curriculum. The agent has been trained on previ
 
 ## Guidelines
 
-- Don't make it drastically harder — the policy needs to transfer
-- Gradually increase difficulty (e.g. wider spawn range, remove scaffolding like scripted grasps)
-- If the previous stage had very high success rate, you can make a bigger step
-- If the previous stage struggled, make only a tiny step or even add more scaffolding
-- Set timesteps as a conservative upper bound — training will early-stop on success or stagnation
+- If told to make it harder, increase the difficulty as little as possible while still ensuring the agent is learning something new.
+- Do NOT make large jumps in difficulty when making the environment harder. The curriculum should ideally be a smooth progression of small steps.
+- If told to make it easier, significantly reduce difficulty from the last attempt
 
-Use the submit_curriculum_env tool to return your code, rationale, and recommended timesteps for this stage.
+Use the submit_curriculum_env tool to return your code and rationale.
