@@ -8,7 +8,7 @@ from robosuite.wrappers import Wrapper, GymWrapper
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
+from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
 import wandb
@@ -17,103 +17,7 @@ from wandb.integration.sb3 import WandbCallback
 import yaml
 
 from agent import CurriculumAgent
-
-
-class CurriculumUpdateCallback(BaseCallback):
-    """
-    Custom callback to update the curriculum based on training metrics at the end of rollout.
-    """
-    def __init__(self, curriculum_agent: CurriculumAgent):
-        super().__init__()
-        self.reward_buffer = []
-        self.success_buffer = []
-        self.n_plateau = None
-
-        self.curriculum_agent = curriculum_agent
-
-        self._last_entropy_loss = 0.0
-        self._last_value_loss = 0.0
-
-        # Generate the initial curriculum; application is deferred to _on_training_start
-        # because self.training_env is not available until SB3 wires up self.model.
-        initial_curriculum = self.curriculum_agent.generate_curriculum(training_metrics=None, past_curriculum=None)
-        self.training_history = []
-        self.curriculum_history = [initial_curriculum]
-
-    def _on_training_start(self) -> None:
-        """
-        Set the number of plateau steps based on number of envs and steps per rollout.
-        Apply the initial curriculum once the training env is attached.
-        """
-        plateau_steps = 200_000
-        steps_per_rollout = self.model.n_envs * self.model.n_steps
-        self.n_plateau = max(plateau_steps // steps_per_rollout, 3)
-
-        initial_curriculum_dict = self.curriculum_agent.parse_curriculum_dict(self.curriculum_history[0])
-        self.training_env.env_method("update_curriculum", initial_curriculum_dict)
-
-    def _on_rollout_start(self) -> None:
-        """
-        Snapshot train/* losses here — they were recorded by the previous iteration's
-        train() call and are cleared by logger.dump() before _on_rollout_end runs.
-        """
-        self._last_entropy_loss = float(self.logger.name_to_value["train/entropy_loss"])
-        self._last_value_loss = float(self.logger.name_to_value["train/value_loss"])
-        self.success_buffer.append(float(self.logger.name_to_value["rollout/success_rate"]))
-        self.reward_buffer.append(float(self.logger.name_to_value["rollout/ep_rew_mean"]))
-
-    def _on_step(self) -> bool:
-        """
-        Don't update anything.
-        """
-        return True
-
-    def _on_rollout_end(self) -> None:
-        """
-        If we hit a good success rate, get a new curriculum.
-        If our reward plateaus, also get a new curriculum.
-        """
-        # Skip the first rollout — no train() has run yet, so train/* metrics are still 0.0
-        if len(self.success_buffer) < 2 and len(self.training_history) == 0:
-            return
-
-        update = False
-        stop_reason = None
-        # If we achieve 3 straight rollouts with >90% success rate, consider the curriculum solved
-        if len(self.success_buffer) >= 3 and all(rate > 0.9 for rate in self.success_buffer[-3:]):
-            update = True
-            stop_reason = "success"
-
-        # If the best reward in the last n_plateau rollouts hasn't improved, consider the curriculum plateaued
-        best_reward = max(self.reward_buffer[-self.n_plateau:])
-        best_reward_idx = self.reward_buffer.index(best_reward)
-        if len(self.reward_buffer) >= self.n_plateau and best_reward_idx < len(self.reward_buffer) - self.n_plateau:
-            update = True
-            stop_reason = "plateau"
-
-        # If we beat the curriculum or plateau, update the curriculum
-        if update:
-            entropy = self._last_entropy_loss
-            value_loss = self._last_value_loss
-            training_metrics = {
-                "stop_reason": stop_reason,
-                "success_rate": self.success_buffer[-1],
-                "entropy_loss": entropy,
-                "value_loss": value_loss
-            }
-            self.training_history.append(training_metrics)
-
-            # Call curriculum agent to get new curriculum
-            curriculum_str = self.curriculum_agent.generate_curriculum(self.training_history, self.curriculum_history)
-            self.curriculum_history.append(curriculum_str)
-
-            # Update the underlying envs with the new curriculum
-            curriculum_dict = self.curriculum_agent.parse_curriculum_dict(curriculum_str)
-            self.training_env.env_method("update_curriculum", curriculum_dict)
-
-            # Reset buffers
-            self.success_buffer = []
-            self.reward_buffer = []
+from callback import TextCurriculumCallback
 
 
 class CurriculumWrapper(Wrapper):
@@ -208,32 +112,41 @@ def env_factory(curriculum: bool):
     return _make
 
 
-def make_vec_env(eval: bool, n_envs: int):
+def make_vec_env(evaluate: bool, n_envs: int):
     if n_envs > 1:
-        env = SubprocVecEnv([env_factory(not eval) for _ in range(n_envs)])
+        env = SubprocVecEnv([env_factory(not evaluate) for _ in range(n_envs)])
     else:
-        env = DummyVecEnv([env_factory(not eval)])
+        env = DummyVecEnv([env_factory(not evaluate)])
 
-    env = VecNormalize(env, norm_obs=True, norm_reward=(not eval))
+    env = VecNormalize(env, norm_obs=True, norm_reward=(not evaluate))
 
     return env
 
 
 def train():
 
+    total_timesteps = 10_000_000
+    plateau_steps = 400_000
+
     run = wandb.init(
         project="robosuite",
-        tags=["simplify"]
+        config={
+            "total_timesteps": total_timesteps,
+            "plateau_steps": plateau_steps
+        },
+        tags=["simplify"],
+        sync_tensorboard=True
     )
+    wandb.save("curriculum_log.txt", policy="live") 
 
-    n_envs = 60
-    env = make_vec_env(eval=False, n_envs=n_envs)
+    n_envs = 50
+    env = make_vec_env(evaluate=False, n_envs=n_envs)
 
     with open("configs/simplify.yaml", "r", encoding="utf-8") as f:
         curriculum_agent_cfg = yaml.safe_load(f)["ppo_kwargs"]
-    policy = PPO("MlpPolicy", env, verbose=1, **curriculum_agent_cfg)
+    policy = PPO("MlpPolicy", env, verbose=1, tensorboard_log=f"runs/{run.id}", **curriculum_agent_cfg)
 
-    base_env = make_vec_env(eval=True, n_envs=1)
+    base_env = make_vec_env(evaluate=True, n_envs=10)
     eval_callback = EvalCallback(
         base_env,
         eval_freq=50_000 // n_envs,
@@ -246,9 +159,13 @@ def train():
     wandb_callback = WandbCallback()
 
     curriculum_agent = CurriculumAgent(log_path="curriculum_log.txt")
-    curriculum_callback = CurriculumUpdateCallback(curriculum_agent)
+    curriculum_callback = TextCurriculumCallback(curriculum_agent, plateau_steps=plateau_steps)
 
-    policy.learn(total_timesteps=1_000_000, callback=[curriculum_callback, eval_callback, wandb_callback], progress_bar=True)
+    policy.learn(
+        total_timesteps=total_timesteps,
+        callback=[curriculum_callback, eval_callback, wandb_callback],
+        progress_bar=True
+    )
 
     run.finish()
 

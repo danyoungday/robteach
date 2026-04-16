@@ -4,8 +4,9 @@ __pycache__/
 .pytest_cache/
 logs/
 results/
-old/
-old2/
 wandb/
 figures/
 nohup.out
+runs/
+*.mp4
+curriculum_log.txt
