@@ -1,0 +1,20 @@
+ppo_kwargs:
+  learning_rate: 0.0003
+  n_steps: 512
+  batch_size: 4096
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.001
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: 0.02
+  use_sde: true           # Turns on smooth, state-dependent exploration
+  sde_sample_freq: 4      # Samples new exploration noise every 4 steps
+  policy_kwargs:
+    log_std_init: 0
+    ortho_init: true
+    net_arch:
+      pi: [256, 256]
+      vf: [256, 256]
