@@ -2,7 +2,7 @@ import imageio
 import numpy as np
 import robosuite
 
-from test import CurriculumWrapper
+from wrapper import DictCurriculumWrapper
 
 
 def main():
@@ -18,7 +18,7 @@ def main():
         camera_heights=256,
         camera_widths=256,
     )
-    env = CurriculumWrapper(env)
+    env = DictCurriculumWrapper(env)
     env.update_curriculum({
         "cube_x_range": (0, 0),
         "cube_y_range": (0, 0),

@@ -11,7 +11,7 @@ You want to train more efficiently than a naive approach of training the agent o
 
 You will be provided training progress and past curriculum and should adjust the curriculum accordingly.
 Note: the success rate and reward provided are ON THE CURRENT CURRICULUM, not on the full task. So if the curriculum is very easy, the success rate may be high even if the agent isn't strong at the full task yet.
-At the start of training there are no metrics, so you should generate the absolute most simple curriculum possible. For example, you should remove all initial randomization.
+At the start of training there are no metrics, so you should generate the most simple curriculum possible.
 
 The curriculum is defined by six parameters: the min x and max x range for the cube's position, the min y and max y range for the cube's position, and the min and max rotation range for the cube's orientation.
 The min and max ranges are: [-0.2, 0.2] for x and y, and [-3.14, 3.14] for rotation. These ranges are inclusive so to fix at a single position or orientation, set the min and max to the same value.

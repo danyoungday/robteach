@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.utils import safe_mean
 
 from agent import CurriculumAgent
 
@@ -26,13 +27,6 @@ class HeuristicCurriculumCallback(BaseCallback, ABC):
         steps_per_rollout = self.model.n_envs * self.model.n_steps
         self.n_plateau = max(self.plateau_steps // steps_per_rollout, 3)
 
-    def _on_rollout_start(self) -> None:
-        """
-        Logs the train and success rate of the previous rollout.
-        """
-        self.success_buffer.append(float(self.logger.name_to_value["rollout/success_rate"]))
-        self.reward_buffer.append(float(self.logger.name_to_value["rollout/ep_rew_mean"]))
-
     def _on_step(self) -> bool:
         """
         Don't update anything.
@@ -50,9 +44,13 @@ class HeuristicCurriculumCallback(BaseCallback, ABC):
         """
         If we hit a good success rate or plateau, trigger the curriculum planner.
         """
-        # Skip the first rollout — no train() has run yet, so train/* metrics are still 0.0
-        if len(self.success_buffer) < 2:
+        # Pull rollout metrics from ep_info_buffer — logger.name_to_value is cleared by dump()
+        # in between rollouts, so reading rollout/* from the logger silently returns 0.0.
+        ep_info_buffer = self.model.ep_info_buffer
+        if ep_info_buffer is None or len(ep_info_buffer) == 0:
             return
+        self.reward_buffer.append(safe_mean([ep["r"] for ep in ep_info_buffer]))
+        self.success_buffer.append(safe_mean([ep.get("is_success", 0.0) for ep in ep_info_buffer]))
 
         update = False
         stop_reason = None
@@ -120,7 +118,6 @@ class TextCurriculumCallback(HeuristicCurriculumCallback):
         Snapshot train/* losses here — they were recorded by the previous iteration's
         train() call and are cleared by logger.dump() before _on_rollout_end runs.
         """
-        super()._on_rollout_start()
         self._last_entropy_loss = float(self.logger.name_to_value["train/entropy_loss"])
         self._last_value_loss = float(self.logger.name_to_value["train/value_loss"])
 
@@ -146,3 +143,4 @@ class TextCurriculumCallback(HeuristicCurriculumCallback):
         # Set curriculum on env
         curriculum_dict = self.curriculum_agent.parse_curriculum_dict(curriculum)
         self.training_env.env_method("update_curriculum", curriculum_dict)
+
