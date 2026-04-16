@@ -233,11 +233,11 @@ def train():
         curriculum_agent_cfg = yaml.safe_load(f)["ppo_kwargs"]
     policy = PPO("MlpPolicy", env, verbose=1, **curriculum_agent_cfg)
 
-    base_env = make_vec_env(eval=True, n_envs=n_envs)
+    base_env = make_vec_env(eval=True, n_envs=1)
     eval_callback = EvalCallback(
         base_env,
         eval_freq=50_000 // n_envs,
-        n_eval_episodes=n_envs,
+        n_eval_episodes=10,
         log_path="results/test",
         best_model_save_path="results/test",
         verbose=1
