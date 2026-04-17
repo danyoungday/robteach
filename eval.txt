@@ -1,4 +1,0 @@
-...eline-fixed/checkpoints/ppo_26085384_steps.zip    92.0%  464.56 +/- 67.80
-results/training-aware/stage_0/ppo_final.zip         80.0%  423.17 +/- 98.61
-results/training-aware/stage_1/ppo_final.zip         66.0%  385.94 +/- 128.24
-results/training-aware/stage_2/ppo_final.zip         96.0%  474.46 +/- 34.67
