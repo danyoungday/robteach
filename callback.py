@@ -179,20 +179,28 @@ class VideoCurriculumCallback(HeuristicCurriculumCallback):
         self.render_height = render_height
         self.render_width = render_width
 
-        # Pre-generate the initial reward weights (no video, no past curriculum yet).
-        initial = self.curriculum_agent.generate_curriculum(past_curriculum=None, frames=None)
-        self.curriculum_history = [initial]
+        # Initial curriculum is deferred to _on_training_start so the LLM sees a video of
+        # the untrained policy on its very first call instead of a blank prompt.
+        self.curriculum_history: list[str] = []
 
-        # Set lazily inside _build_render_env() on first plateau/success.
+        # Built lazily — now also used by the initial capture in _on_training_start.
         self._render_env = None
         self._reward_wrapper = None
 
-        # Track what's currently applied so the render env can mirror the training env state.
-        self._current_weights = None
+        # Seed with wrapper defaults so _capture_frames can mirror the training env state
+        # before any LLM call has returned weights.
+        self._current_weights = dict(RewardShapingWrapper.DEFAULT_WEIGHTS)
 
     def _on_training_start(self) -> None:
         super()._on_training_start()
-        weights = self.curriculum_agent.parse_response(self.curriculum_history[0])
+        # Capture behavior of the untrained policy and ask the LLM for the first curriculum
+        # so it's grounded in what the agent actually looks like at step 0.
+        self._build_render_env()
+        frames = self._capture_frames()
+        response = self.curriculum_agent.generate_curriculum(past_curriculum=None, frames=frames)
+        self.curriculum_history.append(response)
+
+        weights = self.curriculum_agent.parse_response(response)
         self._current_weights = weights
         self.training_env.env_method("update_reward_weights", weights)
 

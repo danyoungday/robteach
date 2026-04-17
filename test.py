@@ -7,7 +7,7 @@ import robosuite
 
 from agent import CurriculumAgent
 from callback import VideoCurriculumCallback
-from wrapper import DictCurriculumWrapper
+from wrapper import DictCurriculumWrapper, RewardShapingWrapper
 
 
 # def test_base_curriculum():
@@ -154,7 +154,7 @@ def test_capture_frames():
     )
     callback._build_render_env()
     callback._current_weights = callback.curriculum_agent.parse_response(
-        callback.curriculum_history[0]
+        _StubVideoAgent._WEIGHTS_JSON
     )
     callback.model = _StubModel(callback._render_env.action_space)
 
@@ -171,3 +171,49 @@ def test_capture_frames():
     with imageio.get_writer("test_frames.mp4", fps=2) as writer:
         for frame in frames:
             writer.append_data(frame)
+
+
+def test_reward_shaping_wrapper():
+    """
+    Sanity-check RewardShapingWrapper: known-key updates, typo rejection, zero-all-weights
+    producing exactly 0, isolated action_penalty matching its closed form, base_reward
+    preserved in info, and resting_cube_z captured on reset.
+    """
+    env = robosuite.make(
+        "Lift",
+        robots="Panda",
+        has_renderer=False,
+        has_offscreen_renderer=False,
+        use_camera_obs=False,
+        reward_shaping=False,
+        control_freq=20,
+    )
+    wrapper = RewardShapingWrapper(env)
+    wrapper.reset()
+
+    with pytest.raises(KeyError):
+        wrapper.update_reward_weights({"not_a_real_key": 1.0})
+
+    wrapper.update_reward_weights({"reach_weight": 0.5})
+    assert wrapper.weights["reach_weight"] == 0.5
+    assert wrapper.weights["grasp_weight"] == RewardShapingWrapper.DEFAULT_WEIGHTS["grasp_weight"]
+
+    assert wrapper._resting_cube_z is not None
+
+    action_dim = env.action_spec[0].shape[0]
+    zero_action = np.zeros(action_dim)
+
+    wrapper.update_reward_weights(dict(RewardShapingWrapper.DEFAULT_WEIGHTS))
+    _, reward, _, info = wrapper.step(zero_action)
+    assert np.isfinite(reward)
+    assert "base_reward" in info
+
+    wrapper.reset()
+    wrapper.update_reward_weights({k: 0.0 for k in RewardShapingWrapper.DEFAULT_WEIGHTS})
+    _, reward, _, _ = wrapper.step(zero_action)
+    assert reward == 0.0
+
+    wrapper.update_reward_weights({"action_penalty": 1.0})
+    big_action = np.ones(action_dim) * 0.5
+    _, reward, _, _ = wrapper.step(big_action)
+    assert reward == pytest.approx(-np.mean(big_action ** 2), rel=1e-6)

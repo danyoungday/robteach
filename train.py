@@ -105,12 +105,18 @@ def train(cfg: dict):
     total_timesteps = cfg["total_timesteps"]
     plateau_steps = cfg["plateau_steps"]
 
-    os.mkdir(save_dir, exist_ok=True)
+    if os.path.exists(save_dir):
+        inp = input("Save directory already exists. Replace it? (y/n)")
+        if inp.lower() != "y":
+            print("Exiting without training.")
+            return
+
+    os.mkdir(save_dir)
     with open(f"{save_dir}/config.yaml", "w", encoding="utf-8") as f:
         yaml.dump(cfg, f)
 
-    if curriculum_mode not in ("text", "video"):
-        raise ValueError(f"curriculum_mode must be 'text' or 'video', got {curriculum_mode!r}")
+    if curriculum_mode not in ("text", "video", "baseline"):
+        raise ValueError(f"curriculum_mode must be 'text', or 'video', got {curriculum_mode!r}")
 
     run = wandb.init(
         project="robosuite",
@@ -142,7 +148,7 @@ def train(cfg: dict):
     base_env = make_vec_env(
         evaluate=True, n_envs=10,
         spawn_curriculum=False,  # eval always uses the full spawn distribution
-        reward_shaping_wrapper=use_reward_wrapper,
+        reward_shaping_wrapper=False,  # eval always uses robosuite's default reward
         vecnormalize_path=vecnormalize_path  # don't think this is technically needed but just to be safe
     )
     eval_callback = EvalCallback(
@@ -161,13 +167,15 @@ def train(cfg: dict):
     )
     wandb_callback = WandbCallback()
 
+    llm_log_path = f"{save_dir}/curriculum_log.txt"
+    llm_video_log_dir = f"{save_dir}/curriculum_videos"
     if curriculum_mode == "text":
-        curriculum_agent = CurriculumAgent(log_path="curriculum_log.txt")
+        curriculum_agent = CurriculumAgent(log_path=llm_log_path)
         curriculum_callback = TextCurriculumCallback(curriculum_agent, plateau_steps=plateau_steps)
     else:
         curriculum_agent = VideoCurriculumAgent(
-            log_path="curriculum_log.txt",
-            video_log_dir=f"curriculum_videos/{run.id}",
+            log_path=llm_log_path,
+            video_log_dir=llm_video_log_dir,
         )
         curriculum_callback = VideoCurriculumCallback(curriculum_agent, plateau_steps=plateau_steps)
 
