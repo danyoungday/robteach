@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 import robosuite
+import wandb
 from robosuite.wrappers import GymWrapper
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.utils import safe_mean
@@ -56,6 +57,11 @@ class HeuristicCurriculumCallback(BaseCallback, ABC):
             return
         self.reward_buffer.append(safe_mean([ep["r"] for ep in ep_info_buffer]))
         self.success_buffer.append(safe_mean([ep.get("is_success", 0.0) for ep in ep_info_buffer]))
+        if "ep_base_return" in ep_info_buffer[0]:
+            self.logger.record(
+                "rollout/ep_base_return_mean",
+                safe_mean([ep["ep_base_return"] for ep in ep_info_buffer]),
+            )
 
         update = False
         stop_reason = None
@@ -139,12 +145,24 @@ class VideoCurriculumCallback(HeuristicCurriculumCallback):
         # so it's grounded in what the agent actually looks like at step 0.
         self._build_render_env()
         frames = self._capture_frames()
+        self._log_video_to_wandb(frames, tag="initial")
         response = self.curriculum_agent.generate_curriculum(past_curriculum=None, frames=frames)
         self.curriculum_history.append(response)
 
         weights = self.curriculum_agent.parse_response(response)
         self._current_weights = weights
+        self._log_weights(weights)
         self.training_env.env_method("update_reward_weights", weights)
+
+    def _log_weights(self, weights: dict) -> None:
+        for k, v in weights.items():
+            self.logger.record(f"curriculum/weight/{k}", float(v))
+
+    def _log_video_to_wandb(self, frames: list[np.ndarray], tag: str) -> None:
+        if wandb.run is None or not frames:
+            return
+        video = np.stack(frames).transpose(0, 3, 1, 2)  # (T, H, W, C) → (T, C, H, W)
+        wandb.log({f"curriculum/video/{tag}": wandb.Video(video, fps=2)})
 
     def _build_render_env(self) -> None:
         """Build a single render env with the same wrapper stack as training, minus Monitor/VecEnv."""
@@ -214,6 +232,7 @@ class VideoCurriculumCallback(HeuristicCurriculumCallback):
 
         # Record video
         frames = self._capture_frames()
+        self._log_video_to_wandb(frames, tag=stop_reason)
 
         # Call LLM
         response = self.curriculum_agent.generate_curriculum(
@@ -225,6 +244,7 @@ class VideoCurriculumCallback(HeuristicCurriculumCallback):
         # Get weights
         weights = self.curriculum_agent.parse_response(response)
         self._current_weights = weights
+        self._log_weights(weights)
         self.training_env.env_method("update_reward_weights", weights)
 
 

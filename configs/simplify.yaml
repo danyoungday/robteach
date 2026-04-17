@@ -21,6 +21,8 @@ ppo_kwargs:
 
 total_timesteps: 20_000_000
 plateau_steps: 400_000
-n_envs: 48
+n_envs: 40
+n_eval_envs: 10
+n_eval_episodes: 30
 curriculum_mode: video
-save_dir: results/fixed-lift-video
+save_dir: results/fixed-lift-video-nocrash-forreal-really

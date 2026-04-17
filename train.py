@@ -51,13 +51,15 @@ def env_factory(reward_shaping_wrapper: bool = False):
             has_offscreen_renderer=False,
             use_camera_obs=False,
             reward_shaping=(not reward_shaping_wrapper),
-            control_freq=20
+            control_freq=20,
+            hard_reset=False
         )
         if reward_shaping_wrapper:
             env = RewardShapingWrapper(env)
         env = SuccessWrapper(env)
         env = GymWrapper(env)
-        return Monitor(env, info_keywords=("is_success",))
+        info_keywords = ("is_success",) + (("ep_base_return",) if reward_shaping_wrapper else ())
+        return Monitor(env, info_keywords=info_keywords)
     return _make
 
 
@@ -67,19 +69,23 @@ def make_vec_env(
     reward_shaping_wrapper: bool = False,
     vecnormalize_path: str = None
 ):
+    """
+    Creates a vectorized environment for training or evaluation.
+    if reward_shaping_wrapper is true, the env wraps the default reward with a way for us to change weights online.
+    """
     factories = [
         env_factory(reward_shaping_wrapper=reward_shaping_wrapper)
         for _ in range(n_envs)
     ]
-    env = SubprocVecEnv(factories) if n_envs > 1 else DummyVecEnv(factories)
+    env = SubprocVecEnv(factories, start_method="forkserver") if n_envs > 1 else DummyVecEnv(factories)
 
     # We can load from checkpoint if we want
     if vecnormalize_path is None:
-        env = VecNormalize(env, norm_obs=True, norm_reward=False)
+        env = VecNormalize(env, norm_obs=True, norm_reward=(not reward_shaping_wrapper), training=(not evaluate))
     else:
         env = VecNormalize.load(vecnormalize_path, env)
         env.training = not evaluate
-        env.norm_reward = False
+        env.norm_reward = (not reward_shaping_wrapper)
 
     return env
 
@@ -114,13 +120,16 @@ def train(cfg: dict):
         sync_tensorboard=True
     )
     wandb.save(f"{save_dir}/curriculum_log.txt", policy="live")
+    wandb.save("sysprompts/curriculum_video_system.txt", policy="live")
 
+    # We wrap in the reward_shaping_wrapper if we're doing curriculum learning, otherwise we don't need it and just use
+    # the default reward.
     n_envs = cfg["n_envs"]
     vecnormalize_path = cfg.get("vecnormalize_path")
     env = make_vec_env(
         evaluate=False,
         n_envs=n_envs,
-        reward_shaping_wrapper=True,
+        reward_shaping_wrapper=(curriculum_mode != "default"),
         vecnormalize_path=vecnormalize_path
     )
 
@@ -131,16 +140,18 @@ def train(cfg: dict):
     else:
         policy = PPO.load(checkpoint_path, env=env, verbose=1, tensorboard_log=f"runs/{run.id}", **ppo_params)
 
+    n_eval_envs = cfg["n_eval_envs"]
     base_env = make_vec_env(
         evaluate=True,
-        n_envs=30,
+        n_envs=n_eval_envs,
         reward_shaping_wrapper=False,  # eval always uses robosuite's default reward
         vecnormalize_path=vecnormalize_path  # don't think this is technically needed but just to be safe
     )
+    n_eval_episodes = cfg["n_eval_episodes"]
     eval_callback = EvalCallback(
         base_env,
         eval_freq=100_000 // n_envs,
-        n_eval_episodes=30,
+        n_eval_episodes=n_eval_episodes,
         log_path=save_dir,
         best_model_save_path=save_dir,
         verbose=1
@@ -152,8 +163,9 @@ def train(cfg: dict):
         save_vecnormalize=True
     )
     wandb_callback = WandbCallback()
+    callbacks = [eval_callback, checkpoint_callback, wandb_callback]
 
-    curriculum_callback = None
+    # If we're doing curriculum learning, add the appropriate callback to allow us to modify the reward online.
     if curriculum_mode == "video":
         llm_log_path = f"{save_dir}/curriculum_log.txt"
         llm_video_log_dir = f"{save_dir}/curriculum_videos"
@@ -162,16 +174,14 @@ def train(cfg: dict):
             video_log_dir=llm_video_log_dir,
         )
         curriculum_callback = VideoCurriculumCallback(curriculum_agent, plateau_steps=plateau_steps)
+        callbacks.append(curriculum_callback)
     elif curriculum_mode == "baseline":
         curriculum_callback = BaselineCurriculumCallback(plateau_steps=plateau_steps)
-    elif curriculum_mode == "default":
-        curriculum_callback = DoNothingCurriculumCallback(plateau_steps=plateau_steps)
-    else:
-        raise ValueError(f"Invalid curriculum_mode {curriculum_mode!r}")
+        callbacks.append(curriculum_callback)
 
     policy.learn(
         total_timesteps=total_timesteps,
-        callback=[curriculum_callback, eval_callback, checkpoint_callback, wandb_callback],
+        callback=callbacks,
         progress_bar=True
     )
 

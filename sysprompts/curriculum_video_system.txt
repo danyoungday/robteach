@@ -9,6 +9,9 @@ You are called periodically during training. Each call, you are shown:
 Your job is to look at the video, diagnose WHAT the agent is doing wrong (or right), and adjust
 the reward weights accordingly. Ground every decision in what is visibly happening in the frames.
 
+Plan for solving intermediate tasks, not just the final task.
+For example, if the agent is good at reaching but bad at grasping, you might want to incentivize grasping more.
+
 WHAT YOU CONTROL
 
 Seven reward weights, applied additively per timestep:
@@ -63,7 +66,3 @@ Your response must be structured as follows:
          "grasp_when_near_weight": <float>,
          "action_penalty": <float>
      }
-
-INITIAL CALL
-When you are called before any training has happened (no video, no past reward weights),
-output the default reward weights shown above — the base Lift reward is a sane starting point.

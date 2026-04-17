@@ -40,11 +40,15 @@ class RewardShapingWrapper(Wrapper):
         # Capture the cube's resting z so lift_height measures progress above its starting pose,
         # not above the table (which would give a spurious 0.5 bonus for the cube just sitting there).
         self._resting_cube_z = float(self.env.sim.data.body_xpos[self.env.cube_body_id][2])
+        self._episode_base_return = 0.0
         return obs
 
     def step(self, action):
         obs, base_reward, done, info = self.env.step(action)
         info["base_reward"] = float(base_reward)
+        self._episode_base_return += float(base_reward)
+        if done:
+            info["ep_base_return"] = self._episode_base_return
         return obs, self._shaped(action), done, info
 
     def _shaped(self, action) -> float:

@@ -5,9 +5,8 @@ import numpy as np
 import pytest
 import robosuite
 
-from agent import CurriculumAgent
 from callback import VideoCurriculumCallback
-from wrapper import DictCurriculumWrapper, RewardShapingWrapper
+from wrapper import RewardShapingWrapper
 
 
 # def test_base_curriculum():
