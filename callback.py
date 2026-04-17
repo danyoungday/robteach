@@ -1,8 +1,13 @@
 from abc import ABC, abstractmethod
+
+import numpy as np
+import robosuite
+from robosuite.wrappers import GymWrapper
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.utils import safe_mean
 
-from agent import CurriculumAgent
+from agent import CurriculumAgent, VideoCurriculumAgent
+from wrapper import RewardShapingWrapper
 
 
 class HeuristicCurriculumCallback(BaseCallback, ABC):
@@ -143,4 +148,132 @@ class TextCurriculumCallback(HeuristicCurriculumCallback):
         # Set curriculum on env
         curriculum_dict = self.curriculum_agent.parse_curriculum_dict(curriculum)
         self.training_env.env_method("update_curriculum", curriculum_dict)
+
+
+class VideoCurriculumCallback(HeuristicCurriculumCallback):
+    """
+    Curriculum callback that captures video of the current policy at plateau/success and passes
+    the frames (plus the history of previously-set reward weights — no training statistics) to
+    a VideoCurriculumAgent. The agent returns a reward-weights dict which is applied to all
+    envs in the training vec env. Cube spawn distribution is NOT under LLM control in this
+    callback — the LLM only tunes reward shaping.
+
+    A dedicated single-process robosuite env with offscreen rendering is built lazily on first
+    curriculum update. Observations from this env are normalized manually using stats synced
+    from the training VecNormalize before being passed to the policy.
+    """
+
+    def __init__(
+        self,
+        curriculum_agent: VideoCurriculumAgent,
+        plateau_steps: int,
+        n_episodes: int = 2,
+        frames_per_episode: int = 6,
+        render_height: int = 256,
+        render_width: int = 256,
+    ):
+        super().__init__(plateau_steps)
+        self.curriculum_agent = curriculum_agent
+        self.n_episodes = n_episodes
+        self.frames_per_episode = frames_per_episode
+        self.render_height = render_height
+        self.render_width = render_width
+
+        # Pre-generate the initial reward weights (no video, no past curriculum yet).
+        initial = self.curriculum_agent.generate_curriculum(past_curriculum=None, frames=None)
+        self.curriculum_history = [initial]
+
+        # Set lazily inside _build_render_env() on first plateau/success.
+        self._render_env = None
+        self._reward_wrapper = None
+
+        # Track what's currently applied so the render env can mirror the training env state.
+        self._current_weights = None
+
+    def _on_training_start(self) -> None:
+        super()._on_training_start()
+        weights = self.curriculum_agent.parse_response(self.curriculum_history[0])
+        self._current_weights = weights
+        self.training_env.env_method("update_reward_weights", weights)
+
+    def _build_render_env(self) -> None:
+        """Build a single render env with the same wrapper stack as training, minus Monitor/VecEnv."""
+        env = robosuite.make(
+            "Lift",
+            robots="Panda",
+            has_renderer=False,
+            has_offscreen_renderer=True,
+            use_camera_obs=False,  # policy expects flat obs, not images
+            reward_shaping=False,  # we replace shaping via RewardShapingWrapper
+            control_freq=20,
+        )
+        env = RewardShapingWrapper(env)
+        self._reward_wrapper = env
+        env = GymWrapper(env)
+        self._render_env = env
+
+    def _normalize_obs(self, obs: np.ndarray) -> np.ndarray:
+        """Apply the training VecNormalize obs stats (if any) to a raw obs."""
+        vec_norm = self.model.get_vec_normalize_env()
+        if vec_norm is None:
+            return obs
+        return vec_norm.normalize_obs(np.asarray(obs, dtype=np.float32))
+
+    def _capture_frames(self) -> list[np.ndarray]:
+        """Roll out the current policy deterministically for n_episodes and return subsampled frames."""
+        # Mirror current training-env reward weights on the render env.
+        self._reward_wrapper.update_reward_weights(self._current_weights)
+
+        all_frames: list[np.ndarray] = []
+        for _ in range(self.n_episodes):
+            obs, _ = self._render_env.reset()
+            # Re-grab sim after reset: robosuite's hard_reset=True rebuilds self.sim each
+            # reset(), so a handle captured before reset() renders a dead, un-stepped sim.
+            sim = self._reward_wrapper.env.sim
+            ep_frames = []
+            # Lift's default horizon is 500; bail early on done.
+            for _ in range(500):
+                norm_obs = self._normalize_obs(np.asarray(obs))
+                action, _ = self.model.predict(norm_obs, deterministic=True)
+                obs, _, terminated, truncated, _ = self._render_env.step(action)
+                frame = sim.render(
+                    camera_name="agentview",
+                    width=self.render_width,
+                    height=self.render_height,
+                )
+                ep_frames.append(np.flipud(frame).astype(np.uint8))
+                if terminated or truncated:
+                    break
+
+            if not ep_frames:
+                continue
+            # Subsample evenly to self.frames_per_episode
+            n = min(self.frames_per_episode, len(ep_frames))
+            indices = np.linspace(0, len(ep_frames) - 1, n).astype(int)
+            all_frames.extend(ep_frames[i] for i in indices)
+
+        return all_frames
+
+    def generate_and_set_curriculum(self, stop_reason: str):
+        """
+        Capture behavior video, call the LLM with video + past reward-weight history (no
+        training metrics), apply the new reward weights to the training envs.
+        """
+        if self._render_env is None:
+            self._build_render_env()
+
+        # Record video
+        frames = self._capture_frames()
+
+        # Call LLM
+        response = self.curriculum_agent.generate_curriculum(
+            past_curriculum=self.curriculum_history,
+            frames=frames,
+        )
+        self.curriculum_history.append(response)
+
+        # Get weights
+        weights = self.curriculum_agent.parse_response(response)
+        self._current_weights = weights
+        self.training_env.env_method("update_reward_weights", weights)
 

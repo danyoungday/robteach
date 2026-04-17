@@ -1,9 +1,13 @@
+import imageio
+import json
+
 import numpy as np
 import pytest
 import robosuite
 
 from agent import CurriculumAgent
-from train import CurriculumWrapper
+from callback import VideoCurriculumCallback
+from wrapper import DictCurriculumWrapper
 
 
 # def test_base_curriculum():
@@ -46,7 +50,7 @@ def test_update_placement():
         control_freq=20
     )
 
-    curriculum_wrapper = CurriculumWrapper(env)
+    curriculum_wrapper = DictCurriculumWrapper(env)
 
     default_spawn_ranges = [-0.03, 0.03]
 
@@ -112,3 +116,58 @@ def test_update_placement():
             exceeded_default = True
     assert exceeded_default
 
+
+class _StubVideoAgent:
+    """Stand-in for VideoCurriculumAgent — no Claude calls, fixed reward weights."""
+    _WEIGHTS_JSON = (
+        '{"reach_weight": 1.0, "grasp_weight": 0.25, "success_weight": 2.25, '
+        '"lift_height_weight": 0.0, "vertical_align_weight": 0.0, '
+        '"grasp_when_near_weight": 0.0, "action_penalty": 0.0}'
+    )
+
+    def generate_curriculum(self, past_curriculum=None, frames=None):
+        return self._WEIGHTS_JSON
+
+    def parse_response(self, response):
+        return json.loads(response)
+
+
+class _StubModel:
+    """Random-action policy so _capture_frames has something that actually moves the arm."""
+    def __init__(self, action_space):
+        self._action_space = action_space
+
+    def predict(self, obs, deterministic=True):
+        return self._action_space.sample(), None
+
+    def get_vec_normalize_env(self):
+        return None
+
+
+def test_capture_frames():
+    """
+    VideoCurriculumCallback._capture_frames should return frames that actually change over
+    time. A static sequence means the arm isn't moving or we're rendering from a stale sim.
+    """
+    callback = VideoCurriculumCallback(
+        _StubVideoAgent(), plateau_steps=1000, n_episodes=1, frames_per_episode=6,
+    )
+    callback._build_render_env()
+    callback._current_weights = callback.curriculum_agent.parse_response(
+        callback.curriculum_history[0]
+    )
+    callback.model = _StubModel(callback._render_env.action_space)
+
+    frames = callback._capture_frames()
+
+    assert len(frames) >= 2, f"expected multiple frames, got {len(frames)}"
+    first = frames[0].astype(np.int32)
+    diffs = [int(np.abs(f.astype(np.int32) - first).sum()) for f in frames[1:]]
+    assert any(d > 0 for d in diffs), (
+        "Captured frames are identical — arm isn't moving or the cached sim handle is stale"
+    )
+
+    # Record frames to mp4 for manual inspection:
+    with imageio.get_writer("test_frames.mp4", fps=2) as writer:
+        for frame in frames:
+            writer.append_data(frame)
