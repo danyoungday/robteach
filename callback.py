@@ -6,7 +6,7 @@ from robosuite.wrappers import GymWrapper
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.utils import safe_mean
 
-from agent import CurriculumAgent, VideoCurriculumAgent
+from agent import VideoCurriculumAgent
 from wrapper import RewardShapingWrapper
 
 
@@ -285,3 +285,34 @@ class VideoCurriculumCallback(HeuristicCurriculumCallback):
         self._current_weights = weights
         self.training_env.env_method("update_reward_weights", weights)
 
+
+class BaselineCurriculumCallback(HeuristicCurriculumCallback):
+    """
+    Predefines a set of weights as curriculum, and at each generate_and_set_curriculum, applies the next set of weights
+    in the curriculum. This is a baseline to compare against the LLM-generated curriculum.
+    """
+    def __init__(self, plateau_steps: int):
+        super().__init__(plateau_steps)
+
+        self.curriculum = [
+            {"blah": 1, "blah2": 2, "blah3": 3},
+            {"blah": 0.5, "blah2": 1, "blah3": 1.5}
+        ]
+        self.curriculum_idx = 0
+
+    def generate_and_set_curriculum(self, stop_reason: str):
+        if self.curriculum_idx >= len(self.curriculum):
+            print("Baseline curriculum exhausted. No new curriculum to apply.")
+            return
+
+        new_weights = self.curriculum[self.curriculum_idx]
+        self.training_env.env_method("update_reward_weights", new_weights)
+        self.curriculum_idx += 1
+
+
+class DoNothingCurriculumCallback(HeuristicCurriculumCallback):
+    """
+    Curriculum callback that never updates the curriculum, for an additional baseline.
+    """
+    def generate_and_set_curriculum(self, stop_reason: str):
+        pass

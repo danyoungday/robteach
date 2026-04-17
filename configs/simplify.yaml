@@ -19,8 +19,8 @@ ppo_kwargs:
       pi: [256, 256]
       vf: [256, 256]
 
-total_timesteps: 10_000_000
+total_timesteps: 20_000_000
 plateau_steps: 400_000
 n_envs: 48
 curriculum_mode: video
-save_dir: results/lift-video
+save_dir: results/fixed-lift-video

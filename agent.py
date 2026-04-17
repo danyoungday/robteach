@@ -95,68 +95,6 @@ class LLMAgent():
         return response_content
 
 
-class CurriculumAgent(LLMAgent):
-    """
-    Agent that generates curriculum by taking in training logs
-    """
-    def __init__(self, log_path: str):
-        super().__init__(sysprompt_path="sysprompts/curriculum_system.txt", log_path=log_path)
-
-    @staticmethod
-    def format_metrics(training_metrics: list[dict]) -> str:
-        """
-        Convert a list of training metrics to a string readable by the LLM.
-        Currently the training metrics are assumed to have keys:
-            - stop_reason
-            - success_rate
-            - entropy_loss
-            - value_loss
-        """
-        STOP_EXPLANATIONS = {
-            "plateau": "the agent's performance plateaued and is no longer improving",
-            "success": "the agent successfully completed the curriculum"
-        }
-        lines = []
-        for i, metrics in enumerate(training_metrics):
-            line = f"Curriculum {i+1} ended with reason: {STOP_EXPLANATIONS[metrics['stop_reason']]}\n"
-            line += f"\tBest curriculum success rate: {metrics['success_rate']:.2%}\n"
-            line += f"\tFinal entropy loss: {metrics['entropy_loss']:.4f}\n"
-            line += f"\tFinal value loss: {metrics['value_loss']:.4f}\n"
-            lines.append(line)
-        return "\n\n".join(lines)
-
-    def generate_curriculum(self, training_metrics: list[dict] | None, past_curriculum: list[str] | None) -> dict:
-        """
-        Generate curriculum based on training metrics. Returns parsed curriculum dict.
-        """
-        if training_metrics is None:
-            user_msg = "This is the first stage of curriculum generation, so there are no training metrics or previous curriculum yet."
-
-        else:
-            assert len(training_metrics) == len(past_curriculum), "Length of training metrics and past curriculum must match"
-            user_msg = "Past curriculum:\n"
-            for i, curriculum in enumerate(past_curriculum):
-                user_msg += f"```Curriculum {i+1}:\n{curriculum}\n```\n\n"
-
-            training_metrics_str = self.format_metrics(training_metrics)
-            user_msg += f"\nTraining metrics from past curriculum:\n{training_metrics_str}"
-
-        response_content = self.call_claude(user_msg)
-        return response_content
-
-    def parse_curriculum_dict(self, response_content: str) -> dict:
-        """
-        Parses the output of the LLM into a curriculum dict.
-        """
-        # Parse the final json block from the response as the curriculum output
-        json_blocks = re.findall(r"\{[\s\S]*\}", response_content)
-        if not json_blocks:
-            raise ValueError("No JSON block found in LLM response")
-        curriculum_json = json_blocks[-1]  # Take the last JSON block in the response
-        curriculum_dict = json.loads(curriculum_json)
-        return curriculum_dict
-
-
 class VideoCurriculumAgent(LLMAgent):
     """
     Curriculum agent that receives behavior video (not training metrics) and outputs a
