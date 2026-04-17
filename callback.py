@@ -92,64 +92,6 @@ class HeuristicCurriculumCallback(BaseCallback, ABC):
             self.reward_buffer = []
 
 
-class TextCurriculumCallback(HeuristicCurriculumCallback):
-    """
-    Custom callback to update the curriculum based on training metrics at the end of rollout.
-    """
-    def __init__(self, curriculum_agent: CurriculumAgent, plateau_steps: int):
-        super().__init__(plateau_steps)
-        self.curriculum_agent = curriculum_agent
-
-        self._last_entropy_loss = 0.0
-        self._last_value_loss = 0.0
-
-        # Generate the initial curriculum; application is deferred to _on_training_start
-        # because self.training_env is not available until SB3 wires up self.model.
-        initial_curriculum = self.curriculum_agent.generate_curriculum(training_metrics=None, past_curriculum=None)
-        self.training_history = []
-        self.curriculum_history = [initial_curriculum]
-
-    def _on_training_start(self) -> None:
-        """
-        Apply the initial curriculum once the training env is attached.
-        """
-        super()._on_training_start()
-
-        initial_curriculum_dict = self.curriculum_agent.parse_curriculum_dict(self.curriculum_history[0])
-        self.training_env.env_method("update_curriculum", initial_curriculum_dict)
-
-    def _on_rollout_start(self) -> None:
-        """
-        Snapshot train/* losses here — they were recorded by the previous iteration's
-        train() call and are cleared by logger.dump() before _on_rollout_end runs.
-        """
-        self._last_entropy_loss = float(self.logger.name_to_value["train/entropy_loss"])
-        self._last_value_loss = float(self.logger.name_to_value["train/value_loss"])
-
-    def generate_and_set_curriculum(self, stop_reason: str):
-        """
-        Generate new curriculum using LLM based on previous curriculum and training metrics.
-        """
-        training_metrics = {
-            "stop_reason": stop_reason,
-            "success_rate": self.success_buffer[-1],
-            "avg_reward": self.reward_buffer[-1],
-            "entropy_loss": self._last_entropy_loss,
-            "value_loss": self._last_value_loss
-        }
-        self.training_history.append(training_metrics)
-
-        curriculum = self.curriculum_agent.generate_curriculum(
-            training_metrics=self.training_history,
-            past_curriculum=self.curriculum_history
-        )
-        self.curriculum_history.append(curriculum)
-
-        # Set curriculum on env
-        curriculum_dict = self.curriculum_agent.parse_curriculum_dict(curriculum)
-        self.training_env.env_method("update_curriculum", curriculum_dict)
-
-
 class VideoCurriculumCallback(HeuristicCurriculumCallback):
     """
     Curriculum callback that captures video of the current policy at plateau/success and passes
