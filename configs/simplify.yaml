@@ -26,4 +26,4 @@ n_eval_envs: 10
 n_eval_episodes: 30
 eval_freq: 250_000
 curriculum_mode: video
-save_dir: results/lift-video-fasttrigger
+save_dir: results/lift-video-future

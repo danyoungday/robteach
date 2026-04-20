@@ -121,7 +121,7 @@ def train(cfg: dict):
     )
 
     llm_log_path = f"{save_dir}/curriculum_log.txt"
-    open(llm_log_path, "a").close()
+    open(llm_log_path, "a", encoding="utf-8").close()
     wandb.save(llm_log_path, policy="live")
     wandb.save("sysprompts/curriculum_video_system.txt", policy="live")
 
@@ -189,6 +189,13 @@ def train(cfg: dict):
     )
 
     run.finish()
+
+
+def run_default():
+    with open("configs/simplify.yaml", "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    config["curriculum_mode"] = "default"
+    config["save_dir"] = "results/default-newppo"
 
 
 if __name__ == "__main__":

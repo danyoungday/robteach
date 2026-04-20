@@ -127,8 +127,7 @@ class VideoCurriculumAgent(LLMAgent):
                 "type": "text",
                 "text": (
                     f"Harness context: stop_reason={context.get('stop_reason', 'unknown')!r}, "
-                    f"stage={context.get('stage', 0)}, "
-                    f"remaining_calls={context.get('remaining', 0)}."
+                    f"stage={context.get('stage', 0)}."
                 ),
             })
         if past_curriculum:
@@ -175,7 +174,7 @@ class VideoCurriculumAgent(LLMAgent):
     def generate_curriculum(self, past_curriculum=None, frames=None, context=None) -> str:
         """
         Generate curriculum from (optional) past curriculum, behavior video, and harness
-        context (stop_reason, stage, remaining calls).
+        context (stop_reason, stage).
         Signature intentionally differs from the text-only parent: no training_metrics.
         """
         self._log_video(frames)

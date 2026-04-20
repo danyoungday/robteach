@@ -17,13 +17,21 @@ from wrapper import RewardShapingWrapper
 PLATEAU_RELATIVE_IMPROVEMENT_THRESHOLD = 0.15
 
 # Time-cap safety net: force a curriculum update if nothing has fired in this many env steps.
-PLATEAU_MAX_STEPS_BETWEEN_UPDATES = 1_500_000
+PLATEAU_MAX_STEPS_BETWEEN_UPDATES = 3_000_000
+
+# Sticky success-freeze: once the agent is reliably succeeding, stop the curriculum. A reward
+# curriculum bootstraps the policy into a regime where terminal reward fires often enough to
+# train on its own — further shaping changes after that point destabilize a partly-working
+# policy. 3 rollouts of sustained success at 50% is enough to ride out single-rollout noise.
+SUCCESS_FREEZE_THRESHOLD = 0.5
+SUCCESS_FREEZE_WINDOW = 3
 
 
 class HeuristicCurriculumCallback(BaseCallback, ABC):
     """
-    Our fixed-heuristic curriculum. If the reward doesn't improve for n rollouts, trigger the curriculum planner.
-    If we hit 90% success rate 3 rollouts in a row, also trigger the curriculum planner.
+    Our fixed-heuristic curriculum. If the shaped reward plateaus or the time-cap fires, trigger
+    the curriculum planner. Once the agent is reliably succeeding (see SUCCESS_FREEZE_THRESHOLD),
+    stop firing the curriculum — the terminal reward signal is dense enough to train on its own.
     """
     def __init__(self, plateau_steps: int):
         super().__init__()
@@ -35,6 +43,7 @@ class HeuristicCurriculumCallback(BaseCallback, ABC):
 
         self.n_updates = 0
         self._steps_since_last_update = 0
+        self._curriculum_frozen = False
 
     def _on_training_start(self) -> None:
         """
@@ -74,8 +83,21 @@ class HeuristicCurriculumCallback(BaseCallback, ABC):
                 safe_mean([ep["ep_base_return"] for ep in ep_info_buffer]),
             )
 
-        # If we're solving the task, let the policy keep stabilizing — no curriculum update.
-        if len(self.success_buffer) >= 3 and all(rate > 0.9 for rate in self.success_buffer[-3:]):
+        # If we max out the number of updates, stop to avoid calling the LLM too many times.
+        if self.n_updates > 10:
+            return
+
+        # Sticky freeze: once the agent is reliably succeeding, stop firing the curriculum.
+        # Further reward-function changes at this point are a moving target PPO's value
+        # function must re-track and tend to destabilize the partly-working policy.
+        if not self._curriculum_frozen and len(self.success_buffer) >= SUCCESS_FREEZE_WINDOW and all(
+            rate > SUCCESS_FREEZE_THRESHOLD
+            for rate in self.success_buffer[-SUCCESS_FREEZE_WINDOW:]
+        ):
+            self._curriculum_frozen = True
+            self.logger.record("curriculum/frozen_at_stage", self.n_updates)
+
+        if self._curriculum_frozen:
             return
 
         update = False
@@ -105,10 +127,8 @@ class HeuristicCurriculumCallback(BaseCallback, ABC):
             self.logger.record("curriculum/stop_reason", stop_reason)
             self.logger.record("curriculum/success_rate", self.success_buffer[-1])
 
-            # Don't actually update if we hit n_updates > 10 for API safety with the LLM
-            if self.n_updates <= 10:
-                # TODO: Generate and set new curriculum
-                self.generate_and_set_curriculum(stop_reason)
+            # Generate and set new curriculum
+            self.generate_and_set_curriculum(stop_reason)
 
             # Reset buffers and time-cap counter
             self.success_buffer = []
@@ -133,8 +153,8 @@ class VideoCurriculumCallback(HeuristicCurriculumCallback):
         self,
         curriculum_agent: VideoCurriculumAgent,
         plateau_steps: int,
-        n_episodes: int = 2,
-        frames_per_episode: int = 6,
+        n_episodes: int = 6,
+        frames_per_episode: int = 8,
         render_height: int = 256,
         render_width: int = 256,
     ):
@@ -164,7 +184,7 @@ class VideoCurriculumCallback(HeuristicCurriculumCallback):
         self._build_render_env()
         frames = self._capture_frames()
         self._log_video_to_wandb(frames, tag="initial")
-        context = {"stop_reason": "initial", "stage": 0, "remaining": 10}
+        context = {"stop_reason": "initial", "stage": 0}
         response = self.curriculum_agent.generate_curriculum(
             past_curriculum=None, frames=frames, context=context
         )
@@ -260,7 +280,6 @@ class VideoCurriculumCallback(HeuristicCurriculumCallback):
         context = {
             "stop_reason": stop_reason,
             "stage": self.n_updates,
-            "remaining": 10 - self.n_updates,
         }
         response = self.curriculum_agent.generate_curriculum(
             past_curriculum=self.curriculum_history,
