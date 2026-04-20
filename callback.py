@@ -11,6 +11,15 @@ from agent import VideoCurriculumAgent
 from wrapper import RewardShapingWrapper
 
 
+# Plateau fires when between-window relative improvement drops below this threshold.
+# Tuned for a qualitative curriculum demo: eval data from the reach-only run showed
+# between-window improvements of 10-16% per 1M steps, so 15% catches natural dips.
+PLATEAU_RELATIVE_IMPROVEMENT_THRESHOLD = 0.15
+
+# Time-cap safety net: force a curriculum update if nothing has fired in this many env steps.
+PLATEAU_MAX_STEPS_BETWEEN_UPDATES = 1_500_000
+
+
 class HeuristicCurriculumCallback(BaseCallback, ABC):
     """
     Our fixed-heuristic curriculum. If the reward doesn't improve for n rollouts, trigger the curriculum planner.
@@ -25,6 +34,7 @@ class HeuristicCurriculumCallback(BaseCallback, ABC):
         self.plateau_steps = plateau_steps
 
         self.n_updates = 0
+        self._steps_since_last_update = 0
 
     def _on_training_start(self) -> None:
         """
@@ -57,45 +67,53 @@ class HeuristicCurriculumCallback(BaseCallback, ABC):
             return
         self.reward_buffer.append(safe_mean([ep["r"] for ep in ep_info_buffer]))
         self.success_buffer.append(safe_mean([ep.get("is_success", 0.0) for ep in ep_info_buffer]))
+        self._steps_since_last_update += self.model.n_envs * self.model.n_steps
         if "ep_base_return" in ep_info_buffer[0]:
             self.logger.record(
                 "rollout/ep_base_return_mean",
                 safe_mean([ep["ep_base_return"] for ep in ep_info_buffer]),
             )
 
+        # If we're solving the task, let the policy keep stabilizing — no curriculum update.
+        if len(self.success_buffer) >= 3 and all(rate > 0.9 for rate in self.success_buffer[-3:]):
+            return
+
         update = False
         stop_reason = None
-        # If we achieve 3 straight rollouts with >90% success rate, consider the curriculum solved
-        if len(self.success_buffer) >= 3 and all(rate > 0.9 for rate in self.success_buffer[-3:]):
-            update = True
-            stop_reason = "success"
-
-        # Compare the most recent n_plateau steps to the last n_plateau steps. If the average is worse, we're stagnating
+        # Primary trigger: between-window relative improvement below threshold.
         if len(self.reward_buffer) > self.n_plateau * 2:
             recent_window = self.reward_buffer[-self.n_plateau:]
             previous_window = self.reward_buffer[-self.n_plateau*2:-self.n_plateau]
-            recent_best = max(recent_window)
-            previous_best = max(previous_window)
+            recent_mean = safe_mean(recent_window)
+            previous_mean = safe_mean(previous_window)
+            relative = (recent_mean - previous_mean) / max(abs(previous_mean), 1e-6)
 
-            if recent_best <= previous_best:
+            if relative < PLATEAU_RELATIVE_IMPROVEMENT_THRESHOLD:
                 update = True
                 stop_reason = "plateau"
+
+        # Fallback trigger: force a curriculum update if it's been too long since the last one.
+        if not update and self._steps_since_last_update >= PLATEAU_MAX_STEPS_BETWEEN_UPDATES:
+            update = True
+            stop_reason = "timecap"
 
         # If we beat the curriculum or plateau, update the curriculum
         if update:
             # Log for wandb
             self.n_updates += 1
-            assert self.n_updates <= 10, "Hit max number of curriculum updates. Killing training."
             self.logger.record("curriculum/stage", self.n_updates)
             self.logger.record("curriculum/stop_reason", stop_reason)
             self.logger.record("curriculum/success_rate", self.success_buffer[-1])
 
-            # TODO: Generate and set new curriculum
-            self.generate_and_set_curriculum(stop_reason)
+            # Don't actually update if we hit n_updates > 10 for API safety with the LLM
+            if self.n_updates <= 10:
+                # TODO: Generate and set new curriculum
+                self.generate_and_set_curriculum(stop_reason)
 
-            # Reset buffers
+            # Reset buffers and time-cap counter
             self.success_buffer = []
             self.reward_buffer = []
+            self._steps_since_last_update = 0
 
 
 class VideoCurriculumCallback(HeuristicCurriculumCallback):
@@ -146,7 +164,10 @@ class VideoCurriculumCallback(HeuristicCurriculumCallback):
         self._build_render_env()
         frames = self._capture_frames()
         self._log_video_to_wandb(frames, tag="initial")
-        response = self.curriculum_agent.generate_curriculum(past_curriculum=None, frames=frames)
+        context = {"stop_reason": "initial", "stage": 0, "remaining": 10}
+        response = self.curriculum_agent.generate_curriculum(
+            past_curriculum=None, frames=frames, context=context
+        )
         self.curriculum_history.append(response)
 
         weights = self.curriculum_agent.parse_response(response)
@@ -234,10 +255,17 @@ class VideoCurriculumCallback(HeuristicCurriculumCallback):
         frames = self._capture_frames()
         self._log_video_to_wandb(frames, tag=stop_reason)
 
-        # Call LLM
+        # n_updates was incremented in _on_rollout_end before this is called, so stage=n_updates
+        # is 1 for the first plateau call, 10 for the last.
+        context = {
+            "stop_reason": stop_reason,
+            "stage": self.n_updates,
+            "remaining": 10 - self.n_updates,
+        }
         response = self.curriculum_agent.generate_curriculum(
             past_curriculum=self.curriculum_history,
             frames=frames,
+            context=context,
         )
         self.curriculum_history.append(response)
 
@@ -270,11 +298,3 @@ class BaselineCurriculumCallback(HeuristicCurriculumCallback):
         new_weights = self.curriculum[self.curriculum_idx]
         self.training_env.env_method("update_reward_weights", new_weights)
         self.curriculum_idx += 1
-
-
-class DoNothingCurriculumCallback(HeuristicCurriculumCallback):
-    """
-    Curriculum callback that never updates the curriculum, for an additional baseline.
-    """
-    def generate_and_set_curriculum(self, stop_reason: str):
-        pass

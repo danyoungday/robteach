@@ -1,15 +1,15 @@
 ppo_kwargs:
   learning_rate: 0.0003
   n_steps: 2048
-  batch_size: 1024
-  n_epochs: 4
+  batch_size: 256
+  n_epochs: 10
   gamma: 0.99
   gae_lambda: 0.95
   clip_range: 0.2
   ent_coef: 0.001
   vf_coef: 0.5
   max_grad_norm: 0.5
-  target_kl: 0.02
+  target_kl: null
   use_sde: true           # Turns on smooth, state-dependent exploration
   sde_sample_freq: 4      # Samples new exploration noise every 4 steps
   policy_kwargs:
@@ -19,10 +19,11 @@ ppo_kwargs:
       pi: [256, 256]
       vf: [256, 256]
 
-total_timesteps: 20_000_000
+total_timesteps: 10_000_000
 plateau_steps: 400_000
 n_envs: 40
 n_eval_envs: 10
 n_eval_episodes: 30
+eval_freq: 250_000
 curriculum_mode: video
-save_dir: results/fixed-lift-video-nocrash-forreal-really
+save_dir: results/lift-video-fasttrigger

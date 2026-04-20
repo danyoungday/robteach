@@ -119,9 +119,18 @@ class VideoCurriculumAgent(LLMAgent):
         img.save(buf, format="PNG")
         return base64.standard_b64encode(buf.getvalue()).decode("utf-8")
 
-    def _build_user_content(self, past_curriculum, frames) -> list[dict]:
+    def _build_user_content(self, past_curriculum, frames, context=None) -> list[dict]:
         """Build the Anthropic `content` list: past-curriculum text + interleaved image blocks."""
         blocks: list[dict] = []
+        if context is not None:
+            blocks.append({
+                "type": "text",
+                "text": (
+                    f"Harness context: stop_reason={context.get('stop_reason', 'unknown')!r}, "
+                    f"stage={context.get('stage', 0)}, "
+                    f"remaining_calls={context.get('remaining', 0)}."
+                ),
+            })
         if past_curriculum:
             text = "Past curriculum (oldest first):\n\n"
             for i, curriculum in enumerate(past_curriculum):
@@ -163,13 +172,14 @@ class VideoCurriculumAgent(LLMAgent):
         imageio.mimsave(path, [f.astype(np.uint8) for f in frames], fps=self.video_log_fps)
         return path
 
-    def generate_curriculum(self, past_curriculum=None, frames=None) -> str:
+    def generate_curriculum(self, past_curriculum=None, frames=None, context=None) -> str:
         """
-        Generate curriculum from (optional) past curriculum and (optional) behavior video.
+        Generate curriculum from (optional) past curriculum, behavior video, and harness
+        context (stop_reason, stage, remaining calls).
         Signature intentionally differs from the text-only parent: no training_metrics.
         """
         self._log_video(frames)
-        content = self._build_user_content(past_curriculum, frames)
+        content = self._build_user_content(past_curriculum, frames, context)
         return self.call_claude(content)
 
     def parse_response(self, response_content: str) -> dict:
