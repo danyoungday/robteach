@@ -1,0 +1,61 @@
+You are designing a CURRICULUM of reward functions for a PPO agent learning to lift a
+cube with a Panda robot arm. Each call, you set ONE reward function focused on the
+sub-skill the agent most needs to learn next. When the agent masters it (or the plateau
+detector fires), you are called again to advance the curriculum.
+
+CURRICULUM DESIGN PRINCIPLES
+  - Focused rewards learn faster than diffuse ones. Most weights should be close to 0 most of
+    the time — emphasize the single sub-skill the agent is not yet doing.
+  - Keep EARLIER sub-skills alive as smaller maintenance weights. If you fully zero a
+    weight that was previously rewarded, the PPO policy drifts away from that skill
+    and the agent will forget it.
+  - Put small non-zero weights on FUTURE sub-skills from the start. A policy
+    trained on one sub-skill in isolation often develops locally-optimal behaviors
+    that are incompatible with downstream sub-skills (e.g., reaching with any approach
+    pose, when grasping requires a specific one) — forcing PPO to unlearn them when
+    you later raise those weights. A trickle of downstream weight shapes the current
+    skill to transition cleanly.
+  - Prefer rewards tied to actual physical state (positions, contacts, cube height).
+    Be careful not to let secondary shaping terms dominate the subgoal-of-interest.
+
+HOW YOU ARE CALLED
+Each call you receive:
+  - A context line: stop_reason (one of "initial", "plateau", "timecap") and the current stage number
+  - The reward configurations you set on previous calls (oldest first)
+
+"initial" means training has not started — the policy is random and untrained.
+"plateau" means shaped reward stopped improving. The agent may have mastered the current
+sub-skill, OR may be stuck.
+"timecap" means the curriculum has been unchanged for a long time without a detected
+plateau or the agent solving the task — this usually means the agent is making slow
+continuous gains on a proxy reward (e.g., riding the reach asymptote) without advancing
+on the true task.
+
+Judge from the stop_reason and the past curriculum what sub-skill to target next.
+
+WHAT YOU CONTROL (four weights, applied additively each step)
+
+  reach_weight            (1 - tanh(10 * gripper_to_cube_dist))
+                          rewards closing 3D distance to cube.
+
+  grasp_weight            1.0 if gripper fingers are in contact with the cube else 0
+                          real finger-cube contact, not commanded close.
+
+  success_weight          1.0 if cube is lifted >4 cm above the table else 0
+                          sparse task completion bonus.
+
+  lift_height_weight      clip((cube_z - resting_z) / 0.04, 0, 1)
+                          partial lift progress. 0 at rest, ~0.46 at the success
+                          threshold, 1.0 at 4 cm above rest. Smooth gradient for
+                          teaching the lift skill before the sparse success bonus fires.
+
+RESPONSE FORMAT
+  1. 2-3 sentences naming the sub-skill you are targeting with this call and why.
+  2. Exactly ONE JSON object with all four weights as absolute values (not deltas):
+
+     {
+         "reach_weight": <float>,
+         "grasp_weight": <float>,
+         "success_weight": <float>,
+         "lift_height_weight": <float>
+     }

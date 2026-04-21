@@ -195,3 +195,44 @@ class VideoCurriculumAgent(LLMAgent):
             if isinstance(parsed, dict) and "reach_weight" in parsed:
                 return parsed
         raise ValueError("No reward-weights JSON block (missing 'reach_weight') in response")
+
+
+class TextCurriculumAgent(LLMAgent):
+    """
+    Exact same as the video agent but doesn't have the option to send video frames, so it just gets text input about
+    past curriculum and the context in which it stopped. This is to ablate if the video actually helps.
+    """
+    def __init__(self, log_path: str,
+                 sysprompt_path: str = "sysprompts/curriculum_text_system.txt"):
+        super().__init__(sysprompt_path=sysprompt_path, log_path=log_path)
+
+    def _build_user_content(self, past_curriculum, context=None) -> str:
+        parts = []
+        if context is not None:
+            parts.append(
+                f"Harness context: stop_reason={context.get('stop_reason', 'unknown')!r}, "
+                f"stage={context.get('stage', 0)}."
+            )
+        if past_curriculum:
+            text = "Past curriculum (oldest first):\n\n"
+            for i, curriculum in enumerate(past_curriculum):
+                text += f"```Curriculum {i+1}:\n{curriculum}\n```\n\n"
+            parts.append(text)
+        else:
+            parts.append("This is the first call. No past curriculum.")
+        return "\n\n".join(parts)
+
+    def generate_curriculum(self, past_curriculum=None, context=None) -> str:
+        content = self._build_user_content(past_curriculum, context)
+        return self.call_claude(content)
+
+    def parse_response(self, response_content: str) -> dict:
+        blocks = re.findall(r"\{[\s\S]*?\}", response_content)
+        for block in blocks:
+            try:
+                parsed = json.loads(block)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict) and "reach_weight" in parsed:
+                return parsed
+        raise ValueError("No reward-weights JSON block (missing 'reach_weight') in response")

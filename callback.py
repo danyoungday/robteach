@@ -7,7 +7,7 @@ from robosuite.wrappers import GymWrapper
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 from stable_baselines3.common.utils import safe_mean
 
-from agent import VideoCurriculumAgent
+from agent import VideoCurriculumAgent, TextCurriculumAgent
 from wrapper import RewardShapingWrapper
 
 
@@ -286,8 +286,6 @@ class VideoCurriculumCallback(HeuristicCurriculumCallback):
         frames = self._capture_frames()
         self._log_video_to_wandb(frames, tag=stop_reason)
 
-        # n_updates was incremented in _on_rollout_end before this is called, so stage=n_updates
-        # is 1 for the first plateau call, 10 for the last.
         context = {
             "stop_reason": stop_reason,
             "stage": self.n_updates,
@@ -306,25 +304,48 @@ class VideoCurriculumCallback(HeuristicCurriculumCallback):
         self.training_env.env_method("update_reward_weights", weights)
 
 
-class BaselineCurriculumCallback(HeuristicCurriculumCallback):
+class TextCurriculumCallback(HeuristicCurriculumCallback):
     """
-    Predefines a set of weights as curriculum, and at each generate_and_set_curriculum, applies the next set of weights
-    in the curriculum. This is a baseline to compare against the LLM-generated curriculum.
+    Just looks at previous curriculum and no video, returns new weights.
     """
-    def __init__(self, plateau_steps: int, eval_callback: EvalCallback):
+    def __init__(
+        self,
+        curriculum_agent: TextCurriculumAgent,
+        plateau_steps: int,
+        eval_callback: EvalCallback,
+    ):
         super().__init__(plateau_steps, eval_callback)
+        self.curriculum_agent = curriculum_agent
+        self.curriculum_history: list[str] = []
 
-        self.curriculum = [
-            {"blah": 1, "blah2": 2, "blah3": 3},
-            {"blah": 0.5, "blah2": 1, "blah3": 1.5}
-        ]
-        self.curriculum_idx = 0
+    def _on_training_start(self) -> None:
+        super()._on_training_start()
+        context = {"stop_reason": "initial", "stage": 0}
+        response = self.curriculum_agent.generate_curriculum(
+            past_curriculum=None, context=context
+        )
+        self.curriculum_history.append(response)
+
+        weights = self.curriculum_agent.parse_response(response)
+        self._log_weights(weights)
+        self.training_env.env_method("update_reward_weights", weights)
+
+    def _log_weights(self, weights: dict) -> None:
+        for k, v in weights.items():
+            self.logger.record(f"curriculum/weight/{k}", float(v))
 
     def generate_and_set_curriculum(self, stop_reason: str):
-        if self.curriculum_idx >= len(self.curriculum):
-            print("Baseline curriculum exhausted. No new curriculum to apply.")
-            return
+        """
+        Does the exact same thing as the video curriculum callback but doesn't record frames, just sends the past
+        curriculum and the context to the LLM.
+        """
+        context = {"stop_reason": stop_reason, "stage": self.n_updates}
+        response = self.curriculum_agent.generate_curriculum(
+            past_curriculum=self.curriculum_history,
+            context=context,
+        )
+        self.curriculum_history.append(response)
 
-        new_weights = self.curriculum[self.curriculum_idx]
-        self.training_env.env_method("update_reward_weights", new_weights)
-        self.curriculum_idx += 1
+        weights = self.curriculum_agent.parse_response(response)
+        self._log_weights(weights)
+        self.training_env.env_method("update_reward_weights", weights)

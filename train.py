@@ -22,8 +22,8 @@ from wandb.integration.sb3 import WandbCallback
 
 import yaml
 
-from agent import VideoCurriculumAgent
-from callback import VideoCurriculumCallback, BaselineCurriculumCallback
+from agent import VideoCurriculumAgent, TextCurriculumAgent
+from callback import VideoCurriculumCallback, TextCurriculumCallback
 from wrapper import RewardShapingWrapper
 
 
@@ -110,8 +110,8 @@ def train(cfg: dict):
     with open(f"{save_dir}/config.yaml", "w", encoding="utf-8") as f:
         yaml.dump(cfg, f)
 
-    if curriculum_mode not in ("video", "baseline", 'default'):
-        raise ValueError(f"curriculum_mode must be 'video' 'baseline', or 'default' not {curriculum_mode!r}")
+    if curriculum_mode not in ("video", "baseline", "default", "text"):
+        raise ValueError(f"curriculum_mode must be 'video', 'baseline', 'default', or 'text' not {curriculum_mode!r}")
 
     run = wandb.init(
         project="robosuite",
@@ -180,9 +180,10 @@ def train(cfg: dict):
             curriculum_agent, plateau_steps=plateau_steps, eval_callback=eval_callback
         )
         callbacks.append(curriculum_callback)
-    elif curriculum_mode == "baseline":
-        curriculum_callback = BaselineCurriculumCallback(
-            plateau_steps=plateau_steps, eval_callback=eval_callback
+    elif curriculum_mode == "text":
+        curriculum_agent = TextCurriculumAgent(log_path=llm_log_path)
+        curriculum_callback = TextCurriculumCallback(
+            curriculum_agent, plateau_steps=plateau_steps, eval_callback=eval_callback
         )
         callbacks.append(curriculum_callback)
 
@@ -200,6 +201,14 @@ def run_default():
         config = yaml.safe_load(f)
     config["curriculum_mode"] = "default"
     config["save_dir"] = "results/default-newparams"
+    train(config)
+
+
+def run_novideo():
+    with open("configs/simplify.yaml", "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    config["curriculum_mode"] = "text"
+    config["save_dir"] = "results/no-video-curriculum"
     train(config)
 
 
