@@ -149,7 +149,8 @@ def test_capture_frames():
     time. A static sequence means the arm isn't moving or we're rendering from a stale sim.
     """
     callback = VideoCurriculumCallback(
-        _StubVideoAgent(), plateau_steps=1000, n_episodes=1, frames_per_episode=6,
+        _StubVideoAgent(), plateau_steps=1000, eval_callback=None,
+        n_episodes=1, frames_per_episode=6,
     )
     callback._build_render_env()
     callback._current_weights = callback.curriculum_agent.parse_response(

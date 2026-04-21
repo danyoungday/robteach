@@ -176,10 +176,14 @@ def train(cfg: dict):
             log_path=llm_log_path,
             video_log_dir=llm_video_log_dir,
         )
-        curriculum_callback = VideoCurriculumCallback(curriculum_agent, plateau_steps=plateau_steps)
+        curriculum_callback = VideoCurriculumCallback(
+            curriculum_agent, plateau_steps=plateau_steps, eval_callback=eval_callback
+        )
         callbacks.append(curriculum_callback)
     elif curriculum_mode == "baseline":
-        curriculum_callback = BaselineCurriculumCallback(plateau_steps=plateau_steps)
+        curriculum_callback = BaselineCurriculumCallback(
+            plateau_steps=plateau_steps, eval_callback=eval_callback
+        )
         callbacks.append(curriculum_callback)
 
     policy.learn(
@@ -195,10 +199,14 @@ def run_default():
     with open("configs/simplify.yaml", "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     config["curriculum_mode"] = "default"
-    config["save_dir"] = "results/default-newppo"
+    config["save_dir"] = "results/default-newparams"
+    train(config)
 
 
 if __name__ == "__main__":
+
+    run_default()
+
     config_path = "configs/simplify.yaml"
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)

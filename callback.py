@@ -4,7 +4,7 @@ import numpy as np
 import robosuite
 import wandb
 from robosuite.wrappers import GymWrapper
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 from stable_baselines3.common.utils import safe_mean
 
 from agent import VideoCurriculumAgent
@@ -19,27 +19,33 @@ PLATEAU_RELATIVE_IMPROVEMENT_THRESHOLD = 0.15
 # Time-cap safety net: force a curriculum update if nothing has fired in this many env steps.
 PLATEAU_MAX_STEPS_BETWEEN_UPDATES = 3_000_000
 
-# Sticky success-freeze: once the agent is reliably succeeding, stop the curriculum. A reward
-# curriculum bootstraps the policy into a regime where terminal reward fires often enough to
-# train on its own — further shaping changes after that point destabilize a partly-working
-# policy. 3 rollouts of sustained success at 50% is enough to ride out single-rollout noise.
+# Sticky success-freeze: once the agent is reliably succeeding on eval, stop the curriculum.
+# A reward curriculum bootstraps the policy into a regime where terminal reward fires often
+# enough to train on its own — further shaping changes after that point destabilize a
+# partly-working policy. Uses eval success (deterministic policy) rather than rollout success
+# (stochastic policy with SDE noise): rollout success lags eval significantly, which caused
+# lift-video-future to miss its freeze trigger at 70% eval / 40% rollout. 2 consecutive
+# above-threshold evals is enough to ride out single-eval noise at n_eval_episodes=30.
 SUCCESS_FREEZE_THRESHOLD = 0.5
-SUCCESS_FREEZE_WINDOW = 3
+SUCCESS_FREEZE_WINDOW = 2
 
 
 class HeuristicCurriculumCallback(BaseCallback, ABC):
     """
     Our fixed-heuristic curriculum. If the shaped reward plateaus or the time-cap fires, trigger
-    the curriculum planner. Once the agent is reliably succeeding (see SUCCESS_FREEZE_THRESHOLD),
-    stop firing the curriculum — the terminal reward signal is dense enough to train on its own.
+    the curriculum planner. Once the agent is reliably succeeding on eval (see
+    SUCCESS_FREEZE_THRESHOLD), stop firing the curriculum — the terminal reward signal is dense
+    enough to train on its own. Freeze uses the eval callback's per-eval success history
+    rather than rollout success, because PPO's stochastic/SDE rollout policy systematically
+    under-succeeds the deterministic eval policy.
     """
-    def __init__(self, plateau_steps: int):
+    def __init__(self, plateau_steps: int, eval_callback: EvalCallback):
         super().__init__()
 
         self.reward_buffer = []
-        self.success_buffer = []
         self.n_plateau = None
         self.plateau_steps = plateau_steps
+        self.eval_callback = eval_callback
 
         self.n_updates = 0
         self._steps_since_last_update = 0
@@ -75,7 +81,6 @@ class HeuristicCurriculumCallback(BaseCallback, ABC):
         if ep_info_buffer is None or len(ep_info_buffer) == 0:
             return
         self.reward_buffer.append(safe_mean([ep["r"] for ep in ep_info_buffer]))
-        self.success_buffer.append(safe_mean([ep.get("is_success", 0.0) for ep in ep_info_buffer]))
         self._steps_since_last_update += self.model.n_envs * self.model.n_steps
         if "ep_base_return" in ep_info_buffer[0]:
             self.logger.record(
@@ -87,15 +92,18 @@ class HeuristicCurriculumCallback(BaseCallback, ABC):
         if self.n_updates > 10:
             return
 
-        # Sticky freeze: once the agent is reliably succeeding, stop firing the curriculum.
-        # Further reward-function changes at this point are a moving target PPO's value
-        # function must re-track and tend to destabilize the partly-working policy.
-        if not self._curriculum_frozen and len(self.success_buffer) >= SUCCESS_FREEZE_WINDOW and all(
-            rate > SUCCESS_FREEZE_THRESHOLD
-            for rate in self.success_buffer[-SUCCESS_FREEZE_WINDOW:]
-        ):
-            self._curriculum_frozen = True
-            self.logger.record("curriculum/frozen_at_stage", self.n_updates)
+        # Eval callback appends one success array per eval to `evaluations_successes` (SB3
+        # populates this when `log_path` is set — `train.py` always sets it to save_dir).
+        eval_successes = self.eval_callback.evaluations_successes
+
+        # Sticky freeze: once the deterministic eval policy is reliably succeeding, stop
+        # firing the curriculum. Further reward-function changes at this point are a moving
+        # target PPO's value function must re-track and destabilize the partly-working policy.
+        if not self._curriculum_frozen and len(eval_successes) >= SUCCESS_FREEZE_WINDOW:
+            recent_rates = [float(np.mean(s)) for s in eval_successes[-SUCCESS_FREEZE_WINDOW:]]
+            if all(rate > SUCCESS_FREEZE_THRESHOLD for rate in recent_rates):
+                self._curriculum_frozen = True
+                self.logger.record("curriculum/frozen_at_stage", self.n_updates)
 
         if self._curriculum_frozen:
             return
@@ -125,13 +133,15 @@ class HeuristicCurriculumCallback(BaseCallback, ABC):
             self.n_updates += 1
             self.logger.record("curriculum/stage", self.n_updates)
             self.logger.record("curriculum/stop_reason", stop_reason)
-            self.logger.record("curriculum/success_rate", self.success_buffer[-1])
+            self.logger.record(
+                "curriculum/success_rate",
+                float(np.mean(eval_successes[-1])) if eval_successes else 0.0,
+            )
 
             # Generate and set new curriculum
             self.generate_and_set_curriculum(stop_reason)
 
-            # Reset buffers and time-cap counter
-            self.success_buffer = []
+            # Reset reward buffer and time-cap counter
             self.reward_buffer = []
             self._steps_since_last_update = 0
 
@@ -153,12 +163,13 @@ class VideoCurriculumCallback(HeuristicCurriculumCallback):
         self,
         curriculum_agent: VideoCurriculumAgent,
         plateau_steps: int,
+        eval_callback: EvalCallback,
         n_episodes: int = 6,
         frames_per_episode: int = 8,
         render_height: int = 256,
         render_width: int = 256,
     ):
-        super().__init__(plateau_steps)
+        super().__init__(plateau_steps, eval_callback)
         self.curriculum_agent = curriculum_agent
         self.n_episodes = n_episodes
         self.frames_per_episode = frames_per_episode
@@ -300,8 +311,8 @@ class BaselineCurriculumCallback(HeuristicCurriculumCallback):
     Predefines a set of weights as curriculum, and at each generate_and_set_curriculum, applies the next set of weights
     in the curriculum. This is a baseline to compare against the LLM-generated curriculum.
     """
-    def __init__(self, plateau_steps: int):
-        super().__init__(plateau_steps)
+    def __init__(self, plateau_steps: int, eval_callback: EvalCallback):
+        super().__init__(plateau_steps, eval_callback)
 
         self.curriculum = [
             {"blah": 1, "blah2": 2, "blah3": 3},

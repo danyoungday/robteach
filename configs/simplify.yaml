@@ -6,24 +6,24 @@ ppo_kwargs:
   gamma: 0.99
   gae_lambda: 0.95
   clip_range: 0.2
-  ent_coef: 0.001
+  ent_coef: 0.005
   vf_coef: 0.5
   max_grad_norm: 0.5
   target_kl: null
   use_sde: true           # Turns on smooth, state-dependent exploration
   sde_sample_freq: 4      # Samples new exploration noise every 4 steps
   policy_kwargs:
-    log_std_init: 0
+    log_std_init: -2
     ortho_init: true
     net_arch:
       pi: [256, 256]
       vf: [256, 256]
 
-total_timesteps: 10_000_000
+total_timesteps: 20_000_000
 plateau_steps: 400_000
 n_envs: 40
 n_eval_envs: 10
 n_eval_episodes: 30
 eval_freq: 250_000
 curriculum_mode: video
-save_dir: results/lift-video-future
+save_dir: results/lift-video-newparams
