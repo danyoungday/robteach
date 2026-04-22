@@ -9,7 +9,7 @@ ppo_kwargs:
   ent_coef: 0.001
   vf_coef: 0.5
   max_grad_norm: 0.5
-  target_kl: 0.02
+  target_kl: null
   use_sde: true           # Turns on smooth, state-dependent exploration
   sde_sample_freq: 4      # Samples new exploration noise every 4 steps
   policy_kwargs:
@@ -24,5 +24,6 @@ plateau_steps: 400_000
 n_envs: 40
 n_eval_envs: 10
 n_eval_episodes: 30
+eval_freq: 250_000
 curriculum_mode: video
-save_dir: results/fixed-lift-video-nocrash-forreal-really
+save_dir: results/oldparams-kl-notrigger

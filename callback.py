@@ -4,34 +4,57 @@ import numpy as np
 import robosuite
 import wandb
 from robosuite.wrappers import GymWrapper
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 from stable_baselines3.common.utils import safe_mean
 
-from agent import VideoCurriculumAgent
+from agent import VideoCurriculumAgent, TextCurriculumAgent
 from wrapper import RewardShapingWrapper
+
+
+# Plateau fires when between-window relative improvement drops below this threshold.
+# Tuned for a qualitative curriculum demo: eval data from the reach-only run showed
+# between-window improvements of 10-16% per 1M steps, so 15% catches natural dips.
+PLATEAU_RELATIVE_IMPROVEMENT_THRESHOLD = 0.15
+
+
+# Sticky success-freeze: once the agent is reliably succeeding on eval, stop the curriculum.
+# A reward curriculum bootstraps the policy into a regime where terminal reward fires often
+# enough to train on its own — further shaping changes after that point destabilize a
+# partly-working policy. Uses eval success (deterministic policy) rather than rollout success
+# (stochastic policy with SDE noise): rollout success lags eval significantly, which caused
+# lift-video-future to miss its freeze trigger at 70% eval / 40% rollout. 2 consecutive
+# above-threshold evals is enough to ride out single-eval noise at n_eval_episodes=30.
+SUCCESS_FREEZE_THRESHOLD = 0.5
+SUCCESS_FREEZE_WINDOW = 2
 
 
 class HeuristicCurriculumCallback(BaseCallback, ABC):
     """
-    Our fixed-heuristic curriculum. If the reward doesn't improve for n rollouts, trigger the curriculum planner.
-    If we hit 90% success rate 3 rollouts in a row, also trigger the curriculum planner.
+    Our fixed-heuristic curriculum. If the shaped reward plateaus or the time-cap fires, trigger
+    the curriculum planner. Once the agent is reliably succeeding on eval (see
+    SUCCESS_FREEZE_THRESHOLD), stop firing the curriculum — the terminal reward signal is dense
+    enough to train on its own. Freeze uses the eval callback's per-eval success history
+    rather than rollout success, because PPO's stochastic/SDE rollout policy systematically
+    under-succeeds the deterministic eval policy.
     """
-    def __init__(self, plateau_steps: int):
+    def __init__(self, plateau_steps: int, eval_callback: EvalCallback):
         super().__init__()
 
         self.reward_buffer = []
-        self.success_buffer = []
-        self.n_plateau = None
+        self.n_plateau_base = None
         self.plateau_steps = plateau_steps
+        self.eval_callback = eval_callback
 
         self.n_updates = 0
+        self._steps_since_last_update = 0
+        self._curriculum_frozen = False
 
     def _on_training_start(self) -> None:
         """
         Computes the number of rollouts that corresponds to a number of plateau steps.
         """
         steps_per_rollout = self.model.n_envs * self.model.n_steps
-        self.n_plateau = max(self.plateau_steps // steps_per_rollout, 3)
+        self.n_plateau_base = max(self.plateau_steps // steps_per_rollout, 3)
 
     def _on_step(self) -> bool:
         """
@@ -56,28 +79,51 @@ class HeuristicCurriculumCallback(BaseCallback, ABC):
         if ep_info_buffer is None or len(ep_info_buffer) == 0:
             return
         self.reward_buffer.append(safe_mean([ep["r"] for ep in ep_info_buffer]))
-        self.success_buffer.append(safe_mean([ep.get("is_success", 0.0) for ep in ep_info_buffer]))
+        self._steps_since_last_update += self.model.n_envs * self.model.n_steps
         if "ep_base_return" in ep_info_buffer[0]:
             self.logger.record(
                 "rollout/ep_base_return_mean",
                 safe_mean([ep["ep_base_return"] for ep in ep_info_buffer]),
             )
 
+        # If we max out the number of updates, stop to avoid calling the LLM too many times.
+        if self.n_updates > 10:
+            return
+
+        # Eval callback appends one success array per eval to `evaluations_successes` (SB3
+        # populates this when `log_path` is set — `train.py` always sets it to save_dir).
+        eval_successes = self.eval_callback.evaluations_successes
+
+        # Sticky freeze: once the deterministic eval policy is reliably succeeding, stop
+        # firing the curriculum. Further reward-function changes at this point are a moving
+        # target PPO's value function must re-track and destabilize the partly-working policy.
+        if not self._curriculum_frozen and len(eval_successes) >= SUCCESS_FREEZE_WINDOW:
+            recent_rates = [float(np.mean(s)) for s in eval_successes[-SUCCESS_FREEZE_WINDOW:]]
+            if all(rate > SUCCESS_FREEZE_THRESHOLD for rate in recent_rates):
+                self._curriculum_frozen = True
+                self.logger.record("curriculum/frozen_at_stage", self.n_updates)
+
+        if self._curriculum_frozen:
+            return
+
         update = False
         stop_reason = None
-        # If we achieve 3 straight rollouts with >90% success rate, consider the curriculum solved
-        if len(self.success_buffer) >= 3 and all(rate > 0.9 for rate in self.success_buffer[-3:]):
-            update = True
-            stop_reason = "success"
+        # Grow the window linearly with stage: each successful stage adds another
+        # near-saturated baseline term (reach, then grasp, then lift) that anchors the
+        # denominator of the relative-improvement ratio and dilutes visible progress in
+        # the active term. More rollouts per window both accumulate enough signal to cross
+        # the 15% gate and reduce window-mean noise as σ/√k.
+        n_plateau = self.n_plateau_base * (1 + self.n_updates)
 
-        # Compare the most recent n_plateau steps to the last n_plateau steps. If the average is worse, we're stagnating
-        if len(self.reward_buffer) > self.n_plateau * 2:
-            recent_window = self.reward_buffer[-self.n_plateau:]
-            previous_window = self.reward_buffer[-self.n_plateau*2:-self.n_plateau]
-            recent_best = max(recent_window)
-            previous_best = max(previous_window)
+        # Primary trigger: between-window relative improvement below threshold.
+        if len(self.reward_buffer) > n_plateau * 2:
+            recent_window = self.reward_buffer[-n_plateau:]
+            previous_window = self.reward_buffer[-n_plateau*2:-n_plateau]
+            recent_mean = safe_mean(recent_window)
+            previous_mean = safe_mean(previous_window)
+            relative = (recent_mean - previous_mean) / max(abs(previous_mean), 1e-6)
 
-            if recent_best <= previous_best:
+            if relative < PLATEAU_RELATIVE_IMPROVEMENT_THRESHOLD:
                 update = True
                 stop_reason = "plateau"
 
@@ -85,17 +131,19 @@ class HeuristicCurriculumCallback(BaseCallback, ABC):
         if update:
             # Log for wandb
             self.n_updates += 1
-            assert self.n_updates <= 10, "Hit max number of curriculum updates. Killing training."
             self.logger.record("curriculum/stage", self.n_updates)
             self.logger.record("curriculum/stop_reason", stop_reason)
-            self.logger.record("curriculum/success_rate", self.success_buffer[-1])
+            self.logger.record(
+                "curriculum/success_rate",
+                float(np.mean(eval_successes[-1])) if eval_successes else 0.0,
+            )
 
-            # TODO: Generate and set new curriculum
+            # Generate and set new curriculum
             self.generate_and_set_curriculum(stop_reason)
 
-            # Reset buffers
-            self.success_buffer = []
+            # Reset reward buffer and time-cap counter
             self.reward_buffer = []
+            self._steps_since_last_update = 0
 
 
 class VideoCurriculumCallback(HeuristicCurriculumCallback):
@@ -115,12 +163,13 @@ class VideoCurriculumCallback(HeuristicCurriculumCallback):
         self,
         curriculum_agent: VideoCurriculumAgent,
         plateau_steps: int,
-        n_episodes: int = 2,
-        frames_per_episode: int = 6,
+        eval_callback: EvalCallback,
+        n_episodes: int = 6,
+        frames_per_episode: int = 8,
         render_height: int = 256,
         render_width: int = 256,
     ):
-        super().__init__(plateau_steps)
+        super().__init__(plateau_steps, eval_callback)
         self.curriculum_agent = curriculum_agent
         self.n_episodes = n_episodes
         self.frames_per_episode = frames_per_episode
@@ -146,7 +195,10 @@ class VideoCurriculumCallback(HeuristicCurriculumCallback):
         self._build_render_env()
         frames = self._capture_frames()
         self._log_video_to_wandb(frames, tag="initial")
-        response = self.curriculum_agent.generate_curriculum(past_curriculum=None, frames=frames)
+        context = {"stop_reason": "initial", "stage": 0}
+        response = self.curriculum_agent.generate_curriculum(
+            past_curriculum=None, frames=frames, context=context
+        )
         self.curriculum_history.append(response)
 
         weights = self.curriculum_agent.parse_response(response)
@@ -234,10 +286,14 @@ class VideoCurriculumCallback(HeuristicCurriculumCallback):
         frames = self._capture_frames()
         self._log_video_to_wandb(frames, tag=stop_reason)
 
-        # Call LLM
+        context = {
+            "stop_reason": stop_reason,
+            "stage": self.n_updates,
+        }
         response = self.curriculum_agent.generate_curriculum(
             past_curriculum=self.curriculum_history,
             frames=frames,
+            context=context,
         )
         self.curriculum_history.append(response)
 
@@ -248,33 +304,48 @@ class VideoCurriculumCallback(HeuristicCurriculumCallback):
         self.training_env.env_method("update_reward_weights", weights)
 
 
-class BaselineCurriculumCallback(HeuristicCurriculumCallback):
+class TextCurriculumCallback(HeuristicCurriculumCallback):
     """
-    Predefines a set of weights as curriculum, and at each generate_and_set_curriculum, applies the next set of weights
-    in the curriculum. This is a baseline to compare against the LLM-generated curriculum.
+    Just looks at previous curriculum and no video, returns new weights.
     """
-    def __init__(self, plateau_steps: int):
-        super().__init__(plateau_steps)
+    def __init__(
+        self,
+        curriculum_agent: TextCurriculumAgent,
+        plateau_steps: int,
+        eval_callback: EvalCallback,
+    ):
+        super().__init__(plateau_steps, eval_callback)
+        self.curriculum_agent = curriculum_agent
+        self.curriculum_history: list[str] = []
 
-        self.curriculum = [
-            {"blah": 1, "blah2": 2, "blah3": 3},
-            {"blah": 0.5, "blah2": 1, "blah3": 1.5}
-        ]
-        self.curriculum_idx = 0
+    def _on_training_start(self) -> None:
+        super()._on_training_start()
+        context = {"stop_reason": "initial", "stage": 0}
+        response = self.curriculum_agent.generate_curriculum(
+            past_curriculum=None, context=context
+        )
+        self.curriculum_history.append(response)
+
+        weights = self.curriculum_agent.parse_response(response)
+        self._log_weights(weights)
+        self.training_env.env_method("update_reward_weights", weights)
+
+    def _log_weights(self, weights: dict) -> None:
+        for k, v in weights.items():
+            self.logger.record(f"curriculum/weight/{k}", float(v))
 
     def generate_and_set_curriculum(self, stop_reason: str):
-        if self.curriculum_idx >= len(self.curriculum):
-            print("Baseline curriculum exhausted. No new curriculum to apply.")
-            return
+        """
+        Does the exact same thing as the video curriculum callback but doesn't record frames, just sends the past
+        curriculum and the context to the LLM.
+        """
+        context = {"stop_reason": stop_reason, "stage": self.n_updates}
+        response = self.curriculum_agent.generate_curriculum(
+            past_curriculum=self.curriculum_history,
+            context=context,
+        )
+        self.curriculum_history.append(response)
 
-        new_weights = self.curriculum[self.curriculum_idx]
-        self.training_env.env_method("update_reward_weights", new_weights)
-        self.curriculum_idx += 1
-
-
-class DoNothingCurriculumCallback(HeuristicCurriculumCallback):
-    """
-    Curriculum callback that never updates the curriculum, for an additional baseline.
-    """
-    def generate_and_set_curriculum(self, stop_reason: str):
-        pass
+        weights = self.curriculum_agent.parse_response(response)
+        self._log_weights(weights)
+        self.training_env.env_method("update_reward_weights", weights)

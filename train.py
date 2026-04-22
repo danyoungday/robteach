@@ -14,7 +14,7 @@ from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
 import torch
-torch.set_num_threads(4)
+torch.set_num_threads(8)
 torch.set_num_interop_threads(1)
 
 import wandb
@@ -22,8 +22,8 @@ from wandb.integration.sb3 import WandbCallback
 
 import yaml
 
-from agent import VideoCurriculumAgent
-from callback import VideoCurriculumCallback, BaselineCurriculumCallback, DoNothingCurriculumCallback
+from agent import VideoCurriculumAgent, TextCurriculumAgent
+from callback import VideoCurriculumCallback, TextCurriculumCallback
 from wrapper import RewardShapingWrapper
 
 
@@ -105,13 +105,16 @@ def train(cfg: dict):
         if inp.lower() != "y":
             print("Exiting without training.")
             return
+        else:
+            print("Oops this doesn't work")
+            return
 
     os.mkdir(save_dir)
     with open(f"{save_dir}/config.yaml", "w", encoding="utf-8") as f:
         yaml.dump(cfg, f)
 
-    if curriculum_mode not in ("video", "baseline", 'default'):
-        raise ValueError(f"curriculum_mode must be 'video' 'baseline', or 'default' not {curriculum_mode!r}")
+    if curriculum_mode not in ("video", "baseline", "default", "text"):
+        raise ValueError(f"curriculum_mode must be 'video', 'baseline', 'default', or 'text' not {curriculum_mode!r}")
 
     run = wandb.init(
         project="robosuite",
@@ -119,8 +122,15 @@ def train(cfg: dict):
         tags=["simplify", curriculum_mode],
         sync_tensorboard=True
     )
-    wandb.save(f"{save_dir}/curriculum_log.txt", policy="live")
-    wandb.save("sysprompts/curriculum_video_system.txt", policy="live")
+
+    if curriculum_mode != "default":
+        llm_log_path = f"{save_dir}/curriculum_log.txt"
+        open(llm_log_path, "a", encoding="utf-8").close()
+        wandb.save(llm_log_path, policy="live")
+    if curriculum_mode == "video":
+        wandb.save("sysprompts/curriculum_video_system.txt", policy="live")
+    elif curriculum_mode == "text":
+        wandb.save("sysprompts/curriculum_text_system.txt", policy="live")
 
     # We wrap in the reward_shaping_wrapper if we're doing curriculum learning, otherwise we don't need it and just use
     # the default reward.
@@ -141,6 +151,7 @@ def train(cfg: dict):
         policy = PPO.load(checkpoint_path, env=env, verbose=1, tensorboard_log=f"runs/{run.id}", **ppo_params)
 
     n_eval_envs = cfg["n_eval_envs"]
+    eval_freq = cfg["eval_freq"]
     base_env = make_vec_env(
         evaluate=True,
         n_envs=n_eval_envs,
@@ -150,7 +161,7 @@ def train(cfg: dict):
     n_eval_episodes = cfg["n_eval_episodes"]
     eval_callback = EvalCallback(
         base_env,
-        eval_freq=100_000 // n_envs,
+        eval_freq=eval_freq // n_envs,
         n_eval_episodes=n_eval_episodes,
         log_path=save_dir,
         best_model_save_path=save_dir,
@@ -167,16 +178,20 @@ def train(cfg: dict):
 
     # If we're doing curriculum learning, add the appropriate callback to allow us to modify the reward online.
     if curriculum_mode == "video":
-        llm_log_path = f"{save_dir}/curriculum_log.txt"
         llm_video_log_dir = f"{save_dir}/curriculum_videos"
         curriculum_agent = VideoCurriculumAgent(
             log_path=llm_log_path,
             video_log_dir=llm_video_log_dir,
         )
-        curriculum_callback = VideoCurriculumCallback(curriculum_agent, plateau_steps=plateau_steps)
+        curriculum_callback = VideoCurriculumCallback(
+            curriculum_agent, plateau_steps=plateau_steps, eval_callback=eval_callback
+        )
         callbacks.append(curriculum_callback)
-    elif curriculum_mode == "baseline":
-        curriculum_callback = BaselineCurriculumCallback(plateau_steps=plateau_steps)
+    elif curriculum_mode == "text":
+        curriculum_agent = TextCurriculumAgent(log_path=llm_log_path)
+        curriculum_callback = TextCurriculumCallback(
+            curriculum_agent, plateau_steps=plateau_steps, eval_callback=eval_callback
+        )
         callbacks.append(curriculum_callback)
 
     policy.learn(
@@ -188,8 +203,28 @@ def train(cfg: dict):
     run.finish()
 
 
-if __name__ == "__main__":
-    config_path = "configs/simplify.yaml"
-    with open(config_path, "r", encoding="utf-8") as f:
+def run_default():
+    with open("configs/simplify.yaml", "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
+    config["curriculum_mode"] = "default"
+    config["save_dir"] = "results/default-nokl"
     train(config)
+
+
+def run_novideo():
+    with open("configs/simplify.yaml", "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    config["curriculum_mode"] = "text"
+    config["save_dir"] = "results/no-video-curriculum-nokl"
+    train(config)
+
+
+if __name__ == "__main__":
+    run_novideo()
+    run_default()
+    
+
+    # config_path = "configs/simplify.yaml"
+    # with open(config_path, "r", encoding="utf-8") as f:
+    #     config = yaml.safe_load(f)
+    # train(config)

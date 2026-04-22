@@ -24,17 +24,16 @@ HOW YOU ARE CALLED
 Each call you receive:
   - A context line: stop_reason (one of "initial", "plateau", "timecap") and the current stage number
   - The reward configurations you set on previous calls (oldest first)
-  - Short video frames (~8 per episode, 6 episodes) of the current policy
 
-"initial" means training has not started — the video is a random untrained policy.
+"initial" means training has not started — the policy is random and untrained.
 "plateau" means shaped reward stopped improving. The agent may have mastered the current
-sub-skill, OR may be stuck. Judge from the video.
+sub-skill, OR may be stuck.
 "timecap" means the curriculum has been unchanged for a long time without a detected
 plateau or the agent solving the task — this usually means the agent is making slow
 continuous gains on a proxy reward (e.g., riding the reach asymptote) without advancing
-on the true task. 
+on the true task.
 
-Judge from the video whether the current sub-skill is actually done and what to try next.
+Judge from the stop_reason and the past curriculum what sub-skill to target next.
 
 WHAT YOU CONTROL (four weights, applied additively each step)
 
@@ -53,10 +52,8 @@ WHAT YOU CONTROL (four weights, applied additively each step)
                           teaching the lift skill before the sparse success bonus fires.
 
 RESPONSE FORMAT
-  1. 2-3 sentences describing what you SEE in the video. Be specific — reaching,
-     colliding, hovering, swinging, grasping, dropping.
-  2. 2-3 sentences naming the sub-skill you are targeting with this call and why.
-  3. Exactly ONE JSON object with all four weights as absolute values (not deltas):
+  1. 2-3 sentences naming the sub-skill you are targeting with this call and why.
+  2. Exactly ONE JSON object with all four weights as absolute values (not deltas):
 
      {
          "reach_weight": <float>,

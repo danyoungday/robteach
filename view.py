@@ -7,8 +7,8 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 
 def main():
-    run_name = "lift-video"
-    timestep = 9598464
+    run_name = "lift-video-simplified"
+    timestep = 2_000_000
     policy_path = f"results/{run_name}/checkpoints/ppo_{timestep}_steps.zip"
     vecnorm_path = f"results/{run_name}/checkpoints/ppo_vecnormalize_{timestep}_steps.pkl"
 
@@ -19,7 +19,7 @@ def main():
         has_renderer=False,
         has_offscreen_renderer=True,
         use_camera_obs=False,
-        reward_shaping=False,
+        reward_shaping=True,
         control_freq=20,
         hard_reset=False,
     )
