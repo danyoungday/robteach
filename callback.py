@@ -16,8 +16,6 @@ from wrapper import RewardShapingWrapper
 # between-window improvements of 10-16% per 1M steps, so 15% catches natural dips.
 PLATEAU_RELATIVE_IMPROVEMENT_THRESHOLD = 0.15
 
-# Time-cap safety net: force a curriculum update if nothing has fired in this many env steps.
-PLATEAU_MAX_STEPS_BETWEEN_UPDATES = 3_000_000
 
 # Sticky success-freeze: once the agent is reliably succeeding on eval, stop the curriculum.
 # A reward curriculum bootstraps the policy into a regime where terminal reward fires often
@@ -43,7 +41,7 @@ class HeuristicCurriculumCallback(BaseCallback, ABC):
         super().__init__()
 
         self.reward_buffer = []
-        self.n_plateau = None
+        self.n_plateau_base = None
         self.plateau_steps = plateau_steps
         self.eval_callback = eval_callback
 
@@ -56,7 +54,7 @@ class HeuristicCurriculumCallback(BaseCallback, ABC):
         Computes the number of rollouts that corresponds to a number of plateau steps.
         """
         steps_per_rollout = self.model.n_envs * self.model.n_steps
-        self.n_plateau = max(self.plateau_steps // steps_per_rollout, 3)
+        self.n_plateau_base = max(self.plateau_steps // steps_per_rollout, 3)
 
     def _on_step(self) -> bool:
         """
@@ -110,10 +108,17 @@ class HeuristicCurriculumCallback(BaseCallback, ABC):
 
         update = False
         stop_reason = None
+        # Grow the window linearly with stage: each successful stage adds another
+        # near-saturated baseline term (reach, then grasp, then lift) that anchors the
+        # denominator of the relative-improvement ratio and dilutes visible progress in
+        # the active term. More rollouts per window both accumulate enough signal to cross
+        # the 15% gate and reduce window-mean noise as σ/√k.
+        n_plateau = self.n_plateau_base * (1 + self.n_updates)
+
         # Primary trigger: between-window relative improvement below threshold.
-        if len(self.reward_buffer) > self.n_plateau * 2:
-            recent_window = self.reward_buffer[-self.n_plateau:]
-            previous_window = self.reward_buffer[-self.n_plateau*2:-self.n_plateau]
+        if len(self.reward_buffer) > n_plateau * 2:
+            recent_window = self.reward_buffer[-n_plateau:]
+            previous_window = self.reward_buffer[-n_plateau*2:-n_plateau]
             recent_mean = safe_mean(recent_window)
             previous_mean = safe_mean(previous_window)
             relative = (recent_mean - previous_mean) / max(abs(previous_mean), 1e-6)
@@ -121,11 +126,6 @@ class HeuristicCurriculumCallback(BaseCallback, ABC):
             if relative < PLATEAU_RELATIVE_IMPROVEMENT_THRESHOLD:
                 update = True
                 stop_reason = "plateau"
-
-        # Fallback trigger: force a curriculum update if it's been too long since the last one.
-        if not update and self._steps_since_last_update >= PLATEAU_MAX_STEPS_BETWEEN_UPDATES:
-            update = True
-            stop_reason = "timecap"
 
         # If we beat the curriculum or plateau, update the curriculum
         if update:

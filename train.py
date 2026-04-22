@@ -105,6 +105,9 @@ def train(cfg: dict):
         if inp.lower() != "y":
             print("Exiting without training.")
             return
+        else:
+            print("Oops this doesn't work")
+            return
 
     os.mkdir(save_dir)
     with open(f"{save_dir}/config.yaml", "w", encoding="utf-8") as f:
@@ -120,10 +123,14 @@ def train(cfg: dict):
         sync_tensorboard=True
     )
 
-    llm_log_path = f"{save_dir}/curriculum_log.txt"
-    open(llm_log_path, "a", encoding="utf-8").close()
-    wandb.save(llm_log_path, policy="live")
-    wandb.save("sysprompts/curriculum_video_system.txt", policy="live")
+    if curriculum_mode != "default":
+        llm_log_path = f"{save_dir}/curriculum_log.txt"
+        open(llm_log_path, "a", encoding="utf-8").close()
+        wandb.save(llm_log_path, policy="live")
+    if curriculum_mode == "video":
+        wandb.save("sysprompts/curriculum_video_system.txt", policy="live")
+    elif curriculum_mode == "text":
+        wandb.save("sysprompts/curriculum_text_system.txt", policy="live")
 
     # We wrap in the reward_shaping_wrapper if we're doing curriculum learning, otherwise we don't need it and just use
     # the default reward.
@@ -200,7 +207,7 @@ def run_default():
     with open("configs/simplify.yaml", "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     config["curriculum_mode"] = "default"
-    config["save_dir"] = "results/default-newparams"
+    config["save_dir"] = "results/default-nokl"
     train(config)
 
 
@@ -208,15 +215,16 @@ def run_novideo():
     with open("configs/simplify.yaml", "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     config["curriculum_mode"] = "text"
-    config["save_dir"] = "results/no-video-curriculum"
+    config["save_dir"] = "results/no-video-curriculum-nokl"
     train(config)
 
 
 if __name__ == "__main__":
-
+    run_novideo()
     run_default()
+    
 
-    config_path = "configs/simplify.yaml"
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    train(config)
+    # config_path = "configs/simplify.yaml"
+    # with open(config_path, "r", encoding="utf-8") as f:
+    #     config = yaml.safe_load(f)
+    # train(config)

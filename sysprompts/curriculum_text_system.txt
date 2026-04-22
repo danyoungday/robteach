@@ -17,6 +17,8 @@ CURRICULUM DESIGN PRINCIPLES
     skill to transition cleanly.
   - Prefer rewards tied to actual physical state (positions, contacts, cube height).
     Be careful not to let secondary shaping terms dominate the subgoal-of-interest.
+  - If the video shows the current sub-skill is not yet mastered, DO NOT add a new
+    sub-skill to the reward. Either keep the same weights or adjust the current sub-skill weights to better target the failure mode you see.
 
 HOW YOU ARE CALLED
 Each call you receive:
